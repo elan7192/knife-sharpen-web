@@ -746,7 +746,7 @@ const audio = {
   // touchstart does not count on iOS Safari or Chrome.
   unlock() {
     if (this.ctx) {
-      if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
+      if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume().catch(() => {});
       return;
     }
     const AC = window.AudioContext || window.webkitAudioContext;
@@ -772,7 +772,7 @@ const audio = {
     this.grindGain.gain.value = 0;
     src.connect(this.grindFilter).connect(this.grindGain).connect(this.master);
     src.start();
-    if (ctx.state === 'suspended') ctx.resume();
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
   },
   setGrind(level, freq) {
     if (!this.ctx) return;
@@ -1670,7 +1670,7 @@ document.addEventListener('visibilitychange', () => {
   } else {
     clock.getDelta(); // drop the hidden interval
     renderer.setAnimationLoop(frame);
-    audio.ctx?.resume();
+    audio.ctx?.resume().catch(() => {});
   }
 });
 

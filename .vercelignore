@@ -1,5 +1,5 @@
 models/
-_private
+_private/
 .git
 STATE.md
 screenshot.png
