@@ -271,6 +271,104 @@
       .menu-btns .pair { flex-direction: row; }
       #title .foot { flex-direction: row; justify-content: center; gap: 10px; bottom: calc(env(safe-area-inset-bottom) + 2px); }
     }
+    /* ---- 素材工房 (material lab), sharpness tester, narration (round 7 gameplay) ---- */
+    #labHud { font-size: 14px; padding: 6px 12px; display: flex; align-items: center; gap: 8px; white-space: nowrap; overflow: hidden; }
+    #labHud .mat { font-weight: 600; }
+    #labHud .read { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--muted); }
+    #labHud .read b { font-weight: 700; }
+    #stones button.locked { opacity: 0.38; filter: grayscale(1); }
+    #stones button.done::after { content: '✓'; position: absolute; top: 2px; right: 5px; font-size: 10px; color: var(--green); }
+    #stones button { position: relative; }
+    #stones button b { font-size: 13px; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+    #stones button small { font-size: 11px; }
+    #stones { gap: 6px; }
+    #stones button { height: 50px; }
+    #measureBtn { min-width: 0; padding: 12px 16px; letter-spacing: 0.1em; font-size: 16px; }
+    #measureBtn.ready { animation: pulse 1.4s ease-in-out infinite; }
+    @keyframes pulse { 50% { box-shadow: 0 0 0 4px var(--accent), 0 0 22px var(--accent); } }
+    body.lab #actions button, body.free #actions button { padding-left: 16px; padding-right: 16px; letter-spacing: 0.08em; font-size: 16px; }
+    body.measuring #hud, body.measuring #bottom, body.measuring #angleSlider, body.measuring #stones { opacity: 0; pointer-events: none; transition: opacity 0.3s; }
+    body.measuring #bottom * , body.measuring #stones * { pointer-events: none; }
+
+    #meterLive {
+      position: fixed; left: 50%; top: calc(env(safe-area-inset-top) + 18px); transform: translateX(-50%); pointer-events: none;
+      font-size: 40px; font-weight: 700; color: var(--climax-ink); font-variant-numeric: tabular-nums; letter-spacing: 0.02em;
+      text-shadow: 0 2px 14px rgba(0,0,0,0.85); opacity: 0; transition: opacity 0.25s; white-space: nowrap;
+    }
+    #meterLive small { font-size: 16px; font-weight: 500; margin-left: 4px; color: var(--climax-muted); }
+    #meterLive.show { opacity: 1; }
+    #meter { position: fixed; left: 0; right: 0; bottom: 0; display: flex; justify-content: center; pointer-events: none;
+      padding: 0 calc(env(safe-area-inset-right) + 10px) calc(env(safe-area-inset-bottom) + 10px) calc(env(safe-area-inset-left) + 10px);
+      transform: translateY(110%); transition: transform 0.45s cubic-bezier(0.2, 0.9, 0.25, 1); }
+    #meter.show { transform: none; }
+    #meter .card { pointer-events: auto; width: min(96vw, 430px); background: rgba(11, 13, 18, 0.9); color: var(--climax-ink); padding: 14px 16px 12px; border: 1px solid rgba(232, 241, 248, 0.08); }
+    .meter-head { display: flex; align-items: baseline; gap: 12px; }
+    .meter-kicker { font-size: 11px; letter-spacing: 0.3em; color: var(--climax-muted); }
+    #meterGrams { font-size: 46px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+    #meterGrams small { font-size: 18px; font-weight: 500; color: var(--climax-muted); margin-left: 3px; }
+    #meterGrade { margin-left: auto; align-self: center; font-size: 22px; font-weight: 700; letter-spacing: 0.15em; padding: 4px 12px 4px 16px; border-radius: 8px; border: 2px solid currentColor; transform: rotate(-4deg); }
+    #meterGrade.stamp { animation: stamp 0.42s cubic-bezier(0.3, 1.6, 0.5, 1); }
+    @keyframes stamp { 0% { transform: rotate(-4deg) scale(2.2); opacity: 0; } 100% { transform: rotate(-4deg) scale(1); opacity: 1; } }
+    #meterNote { font-size: 13px; line-height: 1.55; color: var(--climax-muted); margin: 6px 0 4px; min-height: 1.5em; }
+    #meterNote b { color: var(--climax-ink); }
+    #meterChart { display: block; width: 100%; height: 148px; }
+    #meter .row { justify-content: flex-end; gap: 8px; margin-top: 8px; }
+    #meter .row button { padding: 10px 16px; font-size: 15px; letter-spacing: 0.06em; min-width: 0; min-height: 46px; }
+    @media (max-height: 520px) {
+      #meter { left: auto; top: 0; align-items: center; padding: calc(env(safe-area-inset-top) + 8px) calc(env(safe-area-inset-right) + 10px) calc(env(safe-area-inset-bottom) + 8px) 0; transform: translateX(110%); }
+      #meter.show { transform: none; }
+      #meter .card { width: min(48vw, 400px); padding: 10px 12px; }
+      #meterGrams { font-size: 34px; } #meterChart { height: 118px; }
+      #meterLive { left: 28%; }
+    }
+
+    #narr {
+      position: fixed; left: 50%; bottom: calc(env(safe-area-inset-bottom) + 190px); transform: translate(-50%, 8px); width: min(88vw, 420px);
+      text-align: center; pointer-events: none; opacity: 0; transition: opacity 0.6s, transform 0.6s;
+      font-family: "Noto Serif TC", "Songti TC", "PMingLiU", serif; font-size: 17px; line-height: 1.7; letter-spacing: 0.06em;
+      color: #F7F7F2; text-shadow: 0 1px 2px #000, 0 0 18px rgba(0,0,0,0.75);
+    }
+    #narr::before, #narr::after { content: ''; display: block; width: 36px; height: 1px; margin: 6px auto; background: rgba(247,247,242,0.55); }
+    #narr.show { opacity: 1; transform: translate(-50%, 0); }
+    body.cine #narr { bottom: calc(env(safe-area-inset-bottom) + 24px); }
+    @media (max-height: 520px) { #narr { bottom: calc(env(safe-area-inset-bottom) + 76px); font-size: 15px; } }
+
+    #lab .card { background: rgba(11, 13, 18, 0.9); width: min(94vw, 460px); padding: 16px 14px 14px; max-height: 100%; overflow: auto; }
+    #lab h2 { margin: 0 0 2px; font-size: 24px; letter-spacing: 0.25em; color: var(--climax-ink); text-align: center; }
+    #lab .lab-sub { text-align: center; font-size: 12px; color: var(--climax-muted); letter-spacing: 0.12em; margin-bottom: 12px; }
+    #labCards { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .mcard { pointer-events: auto; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; min-height: 0; min-width: 0;
+      padding: 8px 10px 9px; border-radius: 12px; letter-spacing: 0.02em; font-size: 15px; background: rgba(62, 74, 97, 0.55); color: var(--climax-ink);
+      box-shadow: none; border: 1px solid rgba(232, 241, 248, 0.1); }
+    .mcard canvas { width: 120px; height: 52px; align-self: center; margin-bottom: 2px; }
+    .mcard b { font-size: 16px; letter-spacing: 0.08em; }
+    .mcard small { font-size: 11px; color: var(--climax-muted); line-height: 1.35; }
+    .mcard small i { font-style: normal; font-weight: 700; }
+    .mcard.main { grid-column: 1 / -1; flex-direction: row; align-items: center; gap: 12px; background: rgba(176, 74, 51, 0.32); border-color: rgba(224, 122, 95, 0.5); }
+    .mcard.main canvas { margin: 0; }
+    .mcard.locked { opacity: 0.55; }
+    .mcard.cleared b::after { content: ' ✓'; color: var(--green); }
+    #lab .row { justify-content: center; margin-top: 12px; }
+    #lab .row button { font-size: 16px; padding: 10px 22px; letter-spacing: 0.12em; }
+    @media (max-height: 520px) { #labCards { grid-template-columns: repeat(4, 1fr); } .mcard.main { grid-column: span 2; } #lab .card { width: min(96vw, 760px); } }
+    #resultTitle { font-size: clamp(22px, 8.4vw, 34px); white-space: nowrap; letter-spacing: 0.12em; }
+    /* Seven grits: portrait phones get a row of stones in the bottom bar (above the target chips);
+       short landscape screens put the row bottom-left beside the chips and buttons. */
+    #targets button { flex: 1 1 0; min-width: 0; padding: 4px 6px; font-size: 14px; white-space: nowrap; }
+    #targets { gap: 5px; width: 100%; max-width: 440px; }
+    @media (orientation: portrait) {
+      #stones { position: static; transform: none; flex-direction: row; gap: 5px; justify-content: center; }
+      #stones button { width: 46px; height: 44px; border-radius: 12px; }
+      #stones button i { width: 24px; height: 4px; }
+      body.lab #credit { display: none; }
+    }
+    @media (max-height: 520px) {
+      #bottom { display: grid; grid-template-columns: auto auto; grid-template-areas: "stones targets" "stones actions"; justify-content: space-between; align-items: end; column-gap: 12px; }
+      #stones { grid-area: stones; position: static; transform: none; flex-direction: row; gap: 4px; align-self: end; }
+      #stones button { width: 44px; height: 46px; }
+      #targets { grid-area: targets; max-width: 400px; } #actions { grid-area: actions; justify-self: center; } #credit { display: none; }
+    }
+
     .hidden { display: none !important; }
   </style>
   <script type="importmap">
@@ -287,6 +385,7 @@
 
   <div id="hud">
     <div id="orderHud" class="card hidden"></div>
+    <div id="labHud" class="card hidden"></div>
     <div class="card">
       <div class="row">
         <span class="label">鋒利度</span>
@@ -322,7 +421,6 @@
     <span class="cap" style="bottom:2px">0°</span>
   </div>
 
-  <div id="stones" aria-label="砥石"></div>
 
   <div id="cineTop" class="bar-cine"></div>
   <div id="cineBottom" class="bar-cine"></div>
@@ -350,9 +448,11 @@
   </div>
 
   <div id="bottom">
+    <div id="stones" aria-label="砥石"></div>
     <div id="targets" aria-label="試刀目標"></div>
     <div id="actions">
       <button id="menuBtn" class="secondary" aria-label="回標題畫面">標題</button>
+      <button id="measureBtn" class="secondary" aria-label="鋒利度測試儀">測試</button>
       <button id="testBtn">試刀</button>
     </div>
     <div id="credit">場景與刀皆為程式生成・無外部素材</div>
@@ -364,7 +464,8 @@
     <div class="tag">慢慢磨，一刀切開。</div>
     <div class="record hidden" id="titleRecord"></div>
     <div class="menu-btns">
-      <button id="startBtn">開始</button>
+      <button id="labBtn">開始・素材工房</button>
+      <button id="startBtn" class="secondary">委託</button>
       <button id="freeBtn" class="secondary">自由磨刀</button>
       <div class="pair">
         <button id="hapticBtn" class="secondary">震動：開</button>
@@ -372,6 +473,30 @@
       </div>
     </div>
     <div class="foot"><span>場景與刀皆為程式生成・無外部素材</span><button id="resetBtn" class="link hidden">清除紀錄</button></div>
+  </div>
+
+  <div id="lab" class="screen" aria-label="素材工房">
+    <div class="card">
+      <h2>素材工房</h2>
+      <div class="lab-sub">什麼都能磨成刀・磨完就測・最後斷瓶</div>
+      <div id="labCards"></div>
+      <div class="row"><button id="labBackBtn" class="secondary">回標題</button></div>
+    </div>
+  </div>
+
+  <div id="meterLive"></div>
+  <div id="narr"></div>
+  <div id="meter" aria-label="鋒利度測試儀">
+    <div class="card">
+      <div class="meter-kicker" id="meterKicker">鋒利度測試儀</div>
+      <div class="meter-head"><div id="meterGrams">—</div><div id="meterGrade">—</div></div>
+      <div id="meterNote"></div>
+      <canvas id="meterChart" aria-label="進步折線圖"></canvas>
+      <div class="row">
+        <button id="meterBackBtn" class="secondary">繼續磨</button>
+        <button id="meterNextBtn" class="hidden">換下一顆</button>
+      </div>
+    </div>
   </div>
 
   <div id="order" class="screen" aria-label="委託">

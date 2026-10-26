@@ -8,12 +8,15 @@
 // ---------------------------------------------------------------------------
 
 // Screens: title -> order -> sharpen -> cut -> result. Self-transitions are always allowed.
+// 素材工房 (integrate-r8): title -> lab -> sharpen <-> measure (the sharpness tester), result -> lab.
 export const FLOW_EDGES = {
-  title: ['order', 'sharpen'],
-  order: ['title', 'sharpen'],
-  sharpen: ['title', 'order', 'cut'],
+  title: ['order', 'sharpen', 'lab'],
+  order: ['title', 'sharpen', 'lab'],
+  lab: ['title', 'sharpen', 'order'],
+  sharpen: ['title', 'order', 'cut', 'lab', 'measure'],
+  measure: ['sharpen'],
   cut: ['result', 'sharpen'], // cut -> sharpen only when a broken cinematic is recovered
-  result: ['sharpen', 'cut', 'order', 'title'],
+  result: ['sharpen', 'cut', 'order', 'title', 'lab'],
 };
 
 export function createFlowMachine(initial, onIllegal) {
