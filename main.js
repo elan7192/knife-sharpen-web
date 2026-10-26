@@ -3521,7 +3521,7 @@ function startFree() {
 // presses it onto the test thread until it parts, and reads the peak force off a log-scale dial.
 // Every reading lands on the progress chart (one column per grit), so each stone shows its gain.
 // ---------------------------------------------------------------------------
-const TESTER_POS = new THREE.Vector3(-0.27, 0, 0.19); // onTable-local, front left of the stone
+const TESTER_POS = new THREE.Vector3(-0.34, 0, 0.17); // onTable-local, front left of the stone
 const TESTER_YAW = 0.32;
 const TESTER_LIFT = 0.075; // carriage height above contact when parked
 const CHART_COLS = ['磨前', ...STONES.map((s) => s.grit.slice(1))];
@@ -3961,7 +3961,9 @@ function updateCamera(t, realDt) {
     camera.updateProjectionMatrix();
   }
   // Look slightly above the stone on portrait so the HUD doesn't cover it.
-  lookA.set(STATION_X + (portrait ? 0.09 : 0.06), TABLE_TOP + (portrait ? 0.05 : 0.03), 0.04);
+  // Short landscape phones: the HUD covers the left half, so frame the stone right of centre.
+  const wideShift = aspect > 1.6 && window.innerHeight <= 520 ? -0.17 : 0;
+  lookA.set(STATION_X + (portrait ? 0.09 : 0.06) + wideShift, TABLE_TOP + (portrait ? 0.05 : 0.03), 0.04);
   camA.copy(lookA).addScaledVector(SHARPEN_DIR, fitDistance(portrait ? 0.26 : 0.46, portrait ? 0.16 : 0.26, fovA, aspect));
   const tg = stageTarget;
   lookB.set(stage.position.x, STAGE_TOP + BLOCK_H + tg.height * 0.5, stage.position.z);
