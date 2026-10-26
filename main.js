@@ -56,12 +56,15 @@ const RANKS = ['鈍刀', '入門', '見習', '利刃', '名刀', '神品']; // i
 // Order (委託) mode. Order n asks for TARGETS[min(n, last)] (difficulty rises per completed order,
 // then stays at the iceberg); the customer cycles through this list. The knife is always the gyuto.
 const CUSTOMERS = [
-  { name: '王老闆', from: '老街豆腐店', knife: '天天切豆腐、刃口鈍掉的牛刀', line: '豆腐都切得坑坑巴巴的，麻煩你了。' },
-  { name: '陳師傅', from: '竹林工坊', knife: '劈竹子劈到有點捲刃的牛刀', line: '慢慢磨就好，不急。' },
-  { name: '林師傅', from: '打鐵鋪', knife: '剛打好、還沒開鋒的牛刀', line: '我只管打鐵，磨刀就交給你了。' },
-  { name: '張大哥', from: '山腳石材行', knife: '刃口崩了一點的牛刀', line: '聽說磨得夠利，連石頭都切得開？' },
-  { name: '小雪', from: '冰雕工作室', knife: '收了一整年、鈍掉的牛刀', line: '希望它能像冰一樣俐落。' },
-  { name: '阿明', from: '漁港', knife: '沾了海水、有點鈍的牛刀', line: '剛收完漁獲，刀鈍到切不動魚。' },
+  { name: '王老闆', from: '老街豆腐店', knife: '牛刀・天天切豆腐，刃口已鈍', line: '豆腐都切得坑坑巴巴的，麻煩你了。', reaction: '這下豆腐會乖乖分開了，多謝！', style: 1 },
+  { name: '陳師傅', from: '竹林工坊', knife: '三德刀・劈竹筍後有點捲刃', line: '慢慢磨就好，不急。', reaction: '手感回來了，今晚就拿它做飯。', style: 2 },
+  { name: '林師傅', from: '打鐵鋪', knife: '出刃・剛打好，還沒開鋒', line: '我只管打鐵，磨刀就交給你了。', reaction: '刃線真漂亮，這才像一把好刀。', style: 3 },
+  { name: '張大哥', from: '山腳石材行', knife: '鄉下菜刀・刃口崩了一點', line: '聽說磨得夠利，連石頭都切得開？', reaction: '俐落！回去切柴也不費力了。', style: 4 },
+  { name: '小雪', from: '冰雕工作室', knife: '柳刃・收了一整年，鈍掉了', line: '希望它能像冰一樣俐落。', reaction: '好亮的刃，冰花一定會切得很乾淨。', style: 5 },
+  { name: '阿明', from: '漁港', knife: '出刃・沾海水後變鈍', line: '剛收完漁獲，刀鈍到切不動魚。', reaction: '明早處理漁獲，就靠這把了。', style: 6 },
+  { name: '許阿姨', from: '市場青菜攤', knife: '菜切・切菜時總會黏住', line: '青菜一多就手忙腳亂，幫我磨利些。', reaction: '切高麗菜像風吹過一樣順！', style: 7 },
+  { name: '周師傅', from: '小館後廚', knife: '中式菜刀・刀腹厚、刃口疲了', line: '晚市前能讓它精神一點嗎？', reaction: '好，這把能再忙一整晚。', style: 8 },
+  { name: '美紀', from: '便當小屋', knife: '三德刀・切番茄會擠出汁', line: '想把每一片番茄都切得漂漂亮亮。', reaction: '太好了，便當看起來會更好吃。', style: 9 },
 ];
 // Order scoring (deterministic, 0–100). Each part is a 0..1 ratio times its weight; weights sum to 100.
 //   margin     final sharpness over the requirement; full at need + min(marginFull, marginCeil - need)
@@ -148,13 +151,13 @@ const canvas = renderer.domElement;
 const PALETTES = {
   day: {
     skyTop: '#C9D8C5', skyBottom: '#F3EBDD', wood: '#B08A63', stone: '#7C7A75', water: '#4E6E7E',
-    leaf: '#6F8F6A', moss: '#C9D8C5', gravel: '#DCD3C3', sun: '#FFF4E2', sunI: 2.1,
-    hemiSky: '#F3EBDD', hemiGround: '#6F8F6A', hemiI: 0.95, envI: 0.55, glow: '#FFD27A', lanternI: 0.6,
+    leaf: '#6F8F6A', moss: '#C9D8C5', gravel: '#DCD3C3', sun: '#FFF4E2', sunI: 2.35,
+    hemiSky: '#F3EBDD', hemiGround: '#6F8F6A', hemiI: 1.05, envI: 0.58, glow: '#FFD27A', lanternI: 0.42,
   },
   dusk: {
     skyTop: '#8E6C8A', skyBottom: '#F2B880', wood: '#A8643C', stone: '#5C5650', water: '#3E4A61',
-    leaf: '#5E7A5C', moss: '#8E9A80', gravel: '#B9A493', sun: '#F2B880', sunI: 1.25,
-    hemiSky: '#8E6C8A', hemiGround: '#3E4A61', hemiI: 0.8, envI: 0.45, glow: '#FFD27A', lanternI: 1.6,
+    leaf: '#5E7A5C', moss: '#8E9A80', gravel: '#B9A493', sun: '#F2B880', sunI: 1.05,
+    hemiSky: '#8E6C8A', hemiGround: '#3E4A61', hemiI: 0.7, envI: 0.4, glow: '#FFD27A', lanternI: 1.95,
   },
 };
 const P = Object.fromEntries(Object.entries(PALETTES[TIME]).map(([k, v]) => [k, typeof v === 'string' ? new THREE.Color(v) : v]));
@@ -305,6 +308,46 @@ scene.add(stage);
     moss.push(place(new THREE.CircleGeometry(r, 9), x, 0.006, z, -Math.PI / 2, 0, 0, sx, 1, 1));
   }
   scene.add(merged(moss, mat.mossLight, false, true));
+}
+
+// Quiet workshop backdrop: all static parts are merged, so the extra composition costs only a
+// handful of draws and stays behind the sharpening and test-cut camera corridors.
+const norenPanels = [];
+{
+  // A low wooden floor at the rear makes the garden read as an open-front workshop.
+  const boards = [];
+  for (let i = 0; i < 10; i++) boards.push(place(new THREE.BoxGeometry(0.42, 0.026, 1.15), -1.9 + i * 0.42, 0.014, -1.18 + (i & 1) * 0.012));
+  scene.add(merged(boards, mat.wood, true, true));
+  const seams = [];
+  for (let i = 0; i < 9; i++) seams.push(place(new THREE.BoxGeometry(0.014, 0.004, 1.16), -1.69 + i * 0.42, 0.029, -1.18));
+  scene.add(merged(seams, mat.darkWood, false, true));
+
+  // Shoji/wall lattice. Its right edge reads beyond the bench while the bulk stays left of the stage view.
+  const wall = [], lattice = [];
+  wall.push(place(new THREE.BoxGeometry(2.2, 1.4, 0.045), -1.05, 1.24, -1.22));
+  for (let x = -2.1; x <= 0.01; x += 0.32) lattice.push(place(new THREE.BoxGeometry(0.026, 1.47, 0.06), x, 1.24, -1.17));
+  for (let y = 0.6; y <= 1.87; y += 0.27) lattice.push(place(new THREE.BoxGeometry(2.22, 0.026, 0.06), -1.05, y, -1.17));
+  const paperWall = flat(TIME === 'dusk' ? '#F2B880' : '#F3EBDD', 1);
+  scene.add(merged(wall, paperWall, false, true), merged(lattice, mat.darkWood, true, true));
+
+  // 暖簾: canvas crest is generated locally, with four stiff cloth panels gently rocking as groups.
+  const crestCanvas = document.createElement('canvas');
+  crestCanvas.width = crestCanvas.height = 96;
+  const cg = crestCanvas.getContext('2d');
+  cg.fillStyle = TIME === 'dusk' ? '#A8643C' : '#B04A33'; cg.fillRect(0, 0, 96, 96);
+  cg.strokeStyle = '#F5EFE6'; cg.lineWidth = 5; cg.beginPath(); cg.arc(48, 48, 27, 0, Math.PI * 2); cg.stroke();
+  cg.fillStyle = '#F5EFE6'; cg.font = 'bold 34px sans-serif'; cg.textAlign = 'center'; cg.textBaseline = 'middle'; cg.fillText('研', 48, 50);
+  const crestTex = new THREE.CanvasTexture(crestCanvas); crestTex.colorSpace = THREE.SRGBColorSpace;
+  const clothMat = new THREE.MeshStandardMaterial({ map: crestTex, roughness: 0.95, side: THREE.DoubleSide, flatShading: true });
+  const rail = merged([place(new THREE.CylinderGeometry(0.025, 0.025, 1.7, 8), -0.3, 1.1, -1.02, 0, 0, Math.PI / 2)], mat.darkWood);
+  scene.add(rail);
+  for (let i = 0; i < 4; i++) {
+    const pivot = new THREE.Group();
+    const cloth = mesh(new THREE.BoxGeometry(0.34, 0.7, 0.018), clothMat, false, false);
+    cloth.position.y = -0.35;
+    pivot.add(cloth); pivot.position.set(-1.03 + i * 0.42, 1.07, -0.98);
+    scene.add(pivot); norenPanels.push({ pivot, phase: i * 1.7 });
+  }
 }
 
 // Plank table (main table; whetstone sits on it)
@@ -767,6 +810,34 @@ function makeDotTexture() {
 }
 const dotTex = makeDotTexture();
 
+// A single, tiny preallocated mote cloud catches the window / lantern light. Unlike the action
+// particles it never allocates or respawns; touch devices use a smaller cloud.
+const dust = (() => {
+  const count = isMobile ? 12 : 48;
+  const pos = new Float32Array(Math.max(1, count) * 3);
+  const base = new Float32Array(Math.max(1, count) * 3);
+  const phase = new Float32Array(Math.max(1, count));
+  for (let i = 0; i < count; i++) {
+    const n = i * 3;
+    base[n] = -0.35 + rand() * 1.05; base[n + 1] = 0.86 + rand() * 0.58; base[n + 2] = -0.38 + rand() * 0.72;
+    phase[i] = rand() * Math.PI * 2;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage));
+  const points = new THREE.Points(geo, new THREE.PointsMaterial({ map: dotTex, color: P.glow, size: 0.018, transparent: true, opacity: 0.24, depthWrite: false }));
+  points.frustumCulled = false; points.visible = count > 0; scene.add(points);
+  return { update(t) {
+    if (!count) return;
+    for (let i = 0; i < count; i++) {
+      const n = i * 3, p = phase[i];
+      pos[n] = base[n] + Math.sin(t * 0.37 + p) * 0.035;
+      pos[n + 1] = base[n + 1] + Math.sin(t * 0.62 + p * 1.7) * 0.055;
+      pos[n + 2] = base[n + 2] + Math.cos(t * 0.31 + p) * 0.025;
+    }
+    geo.attributes.position.needsUpdate = true;
+  }};
+})();
+
 class Particles {
   constructor(max, { size, additive, gravity }) {
     this.max = max;
@@ -909,6 +980,14 @@ const audio = {
     this.body = layer(this.noise, 'bandpass', 900, 0.9);
     this.grit = layer(this.gritBuf, 'highpass', 1800, 0.7);
     this.hiss = layer(this.noise, 'bandpass', 4000, 1.5);
+    // Reused room tone: a filtered noise bed plus a near-inaudible low air resonance.
+    // It is intentionally created once on the first gesture, never once per frame or event.
+    this.ambience = layer(this.noise, 'lowpass', 420, 0.7);
+    this.ambience.g.gain.value = 0.018;
+    this.ambientTone = ctx.createOscillator();
+    this.ambientTone.type = 'sine'; this.ambientTone.frequency.value = 92;
+    this.ambientGain = ctx.createGain(); this.ambientGain.gain.value = 0.006;
+    this.ambientTone.connect(this.ambientGain).connect(this.master); this.ambientTone.start();
     this.grindOn = false;
     if (ctx.state === 'suspended') ctx.resume().catch(() => {});
   },
@@ -987,6 +1066,19 @@ const audio = {
     if (!this.ctx) return;
     this.tone(520, 0.08, 0.1, 'triangle');
     this.tone(1040, 0.05, 0.04);
+  },
+  /** A soft wood-and-bell arrival cue for a fresh commission card. */
+  arrival() {
+    if (!this.ctx) return;
+    this.noiseBurst(0.09, 'bandpass', 700, 1600, 0.045);
+    this.tone(660, 0.38, 0.06, 'sine');
+    this.tone(990, 0.28, 0.035, 'sine', 0.07);
+  },
+  /** Short rank-specific stingers; deliberately modest so they do not fight the cut impact. */
+  rank(rank) {
+    if (!this.ctx) return;
+    const notes = rank === 'S' ? [880, 1109, 1319, 1760] : rank === 'A' ? [740, 932, 1175] : rank === 'B' ? [523, 659] : [392];
+    for (let i = 0; i < notes.length; i++) this.tone(notes[i], rank === 'S' ? 0.65 : 0.35, 0.07, 'sine', i * 0.075);
   },
   slice() {
     if (!this.ctx) return;
@@ -1079,6 +1171,24 @@ function updateTweens(gameDt, realDt) {
 // HUD (DOM writes only when a value changes)
 // ---------------------------------------------------------------------------
 const $ = (id) => document.getElementById(id);
+function customerAvatar(c, canvas) {
+  const cssSize = parseFloat(getComputedStyle(canvas).width) || canvas.getBoundingClientRect().width || 96;
+  const backing = Math.round(cssSize * Math.min(window.devicePixelRatio || 1, 3));
+  canvas.width = canvas.height = backing;
+  const g = canvas.getContext('2d'); g.setTransform(backing / 96, 0, 0, backing / 96, 0, 0); const s = c.style || 1;
+  const apron = ['#B04A33', '#4E6E7E', '#6F8F6A', '#A8643C', '#8E6C8A'][s % 5];
+  const skin = ['#F1C7A5', '#DFA77F', '#C98E69'][s % 3];
+  g.fillStyle = '#F5EFE6'; g.fillRect(0, 0, 96, 96);
+  g.fillStyle = apron; g.beginPath(); g.moveTo(15, 96); g.lineTo(25, 63); g.lineTo(71, 63); g.lineTo(81, 96); g.fill();
+  g.fillStyle = skin; g.beginPath(); g.arc(48, 43, 25, 0, Math.PI * 2); g.fill();
+  g.fillStyle = s % 3 === 0 ? '#2B2A28' : '#5C4034';
+  if (s % 3 === 1) { g.beginPath(); g.arc(48, 34, 27, Math.PI, Math.PI * 2); g.fill(); }
+  else if (s % 3 === 2) { g.fillRect(20, 18, 56, 15); g.fillRect(28, 10, 40, 12); }
+  else { g.beginPath(); g.arc(48, 28, 28, Math.PI, Math.PI * 2); g.fill(); g.fillRect(22, 27, 10, 18); }
+  g.fillStyle = '#2B2A28'; g.beginPath(); g.arc(39, 43, 2.3, 0, Math.PI * 2); g.arc(57, 43, 2.3, 0, Math.PI * 2); g.fill();
+  g.strokeStyle = '#A8643C'; g.lineWidth = 2; g.beginPath(); g.arc(48, 51, 8, 0.15, Math.PI - 0.15); g.stroke();
+  return canvas;
+}
 const ui = {
   sharpFill: $('sharpFill'), sharpText: $('sharpText'),
   angleLight: $('angleLight'), angleText: $('angleText'), angleTarget: $('angleTarget'),
@@ -1094,6 +1204,7 @@ const ui = {
   startBtn: $('startBtn'), freeBtn: $('freeBtn'), acceptBtn: $('acceptBtn'), orderBackBtn: $('orderBackBtn'),
   orderNo: $('orderNo'), orderName: $('orderName'), orderFrom: $('orderFrom'), orderLine: $('orderLine'),
   orderKnife: $('orderKnife'), orderTarget: $('orderTarget'),
+  orderAvatar: $('orderAvatar'), resultAvatar: $('resultAvatar'), resultCustomer: $('resultCustomer'), resultHead: $('resultHead'),
   resultScore: $('resultScore'), retryBtn: $('retryBtn'), nextOrderBtn: $('nextOrderBtn'), titleBtn: $('titleBtn'),
 };
 for (const t of TARGETS) {
@@ -2204,7 +2315,8 @@ function showOrderResult(def, success, sharp) {
   ];
   const lines = [];
   if (success) {
-    lines.push(`${o.from} ${o.customer}：「${RANK_LINES[r.rank]}」`);
+    lines.push(`${o.from} ${o.customer}：「${o.reaction || RANK_LINES[r.rank]}」`);
+    audio.rank(r.rank);
   } else {
     lines.push('沒關係，再磨一下就好。');
     lines.push(`${def.name} 需要 <b>${pct(def.need)}</b>，目前 ${pct(sharp)}`);
@@ -2212,6 +2324,10 @@ function showOrderResult(def, success, sharp) {
     const need = STONES.find((x) => x.cap >= def.need);
     if (need && st.cap < def.need) lines.push(`${st.name}砥最多 ${pct(st.cap)}，換「${need.name}」砥（${need.grit}）`);
   }
+  customerAvatar(o.avatar || { name: o.customer, style: 1 }, ui.resultAvatar);
+  ui.resultAvatar.setAttribute('aria-label', `${o.customer}的頭像`);
+  ui.resultCustomer.textContent = `${o.customer}的回覆`;
+  ui.resultHead.classList.remove('hidden');
   ui.resultBody.innerHTML = `<div class="brk">${brk.join('')}</div>${lines.join('<br>')}`;
   ui.result.classList.add('show');
 }
@@ -2224,7 +2340,10 @@ function setResultButtons(isOrder, success) {
   ui.retryBtn.classList.toggle('hidden', !isOrder || success);
   ui.nextOrderBtn.classList.toggle('hidden', !isOrder || !success);
   ui.titleBtn.classList.toggle('hidden', !isOrder);
-  if (!isOrder) ui.resultScore.classList.add('hidden');
+  if (!isOrder) {
+    ui.resultScore.classList.add('hidden');
+    ui.resultHead.classList.add('hidden');
+  }
 }
 
 /** Ideal full passes (perfect angle and pressure, best stone each pass) to raise the edge from -> to. */
@@ -2370,7 +2489,7 @@ function startOrder() {
   const c = CUSTOMERS[no % CUSTOMERS.length];
   const targetIdx = Math.min(no, TARGETS.length - 1);
   const t = TARGETS[targetIdx];
-  flow.order = { no: no + 1, customer: c.name, from: c.from, knife: c.knife, line: c.line, targetIdx, target: t.id, targetName: t.name, need: t.need, goal: t.need + marginSpan(t.need), done: false };
+  flow.order = { no: no + 1, customer: c.name, from: c.from, knife: c.knife, line: c.line, reaction: c.reaction, avatar: { name: c.name, style: c.style }, targetIdx, target: t.id, targetName: t.name, need: t.need, goal: t.need + marginSpan(t.need), done: false };
   flow.result = null;
   ui.orderNo.textContent = `委託 第 ${no + 1} 件`;
   ui.orderName.textContent = c.name;
@@ -2378,9 +2497,12 @@ function startOrder() {
   ui.orderLine.textContent = `「${c.line}」`;
   ui.orderKnife.textContent = c.knife;
   ui.orderTarget.innerHTML = `切開 <b>${t.name}</b>（${t.need > 0 ? `鋒利度需 ${Math.round(t.need * 100)}%` : '暖身：輕鬆磨一磨就好'}）`;
+  customerAvatar(c, ui.orderAvatar);
+  ui.orderAvatar.setAttribute('aria-label', `${c.name}的頭像`);
   setScreen('order');
   setFlowMode(null);
   leaveResult();
+  audio.arrival();
 }
 
 /** Accept the order: dull edge, coarse stone, fresh stats, then sharpen. */
@@ -2504,7 +2626,8 @@ function updateAtmosphere(t) {
   sun.intensity = lerp(P.sunI, 0.2, k);
   rim.intensity = lerp(0, 3.2, k);
   scene.environmentIntensity = lerp(P.envI, 0.3, k);
-  const flicker = 1 + Math.sin(t * 9) * 0.07 + Math.sin(t * 23) * 0.04;
+  // Two deterministic waves feel like an oil flame without noise allocations or harsh flashing.
+  const flicker = 1 + Math.sin(t * 7.2) * 0.055 + Math.sin(t * 13.7 + 0.8) * 0.025 + Math.sin(t * 23) * 0.012;
   lanternLight.intensity = P.lanternI * flicker * (1 - k * 0.85);
   lanternLight.position.set(LANTERN_POS.x, TABLE_TOP + LANTERN_H * 0.45, LANTERN_POS.z);
 }
@@ -2608,6 +2731,8 @@ function frame() {
   drops.update(gdt, floorY);
   glints.update(gdt, -10);
   bamboo.update(simT);
+  for (let i = 0; i < norenPanels.length; i++) norenPanels[i].pivot.rotation.x = Math.sin(simT * 0.65 + norenPanels[i].phase) * 0.065;
+  dust.update(simT);
   updateCamera(simT, realDt);
   renderer.render(scene, camera);
 }

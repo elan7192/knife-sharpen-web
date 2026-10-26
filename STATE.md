@@ -28,13 +28,17 @@
 2. ~~磨刀手感~~（第 3 輪完成）
 3. ~~試刀高潮~~（第 3 輪完成）
 4. ~~遊戲流程~~（第 4 輪完成）
-5. 場景打磨
+5. ~~場景打磨~~（第 5 輪完成）
 6. ~~UNITY_PORT.md~~（已完成；回到電腦後照第 4 節順序移植）
 7. 實機 iPhone Safari 試玩確認手感與 fps（無頭測試用軟體繪圖，fps 不具參考性）
-8. 委託加入多種刀型文案、客人頭像（程式繪製）、音效精修
+8. ~~委託加入多種刀型文案、客人頭像（程式繪製）、音效精修~~（第 5 輪完成）
 
 ## 部署更新（2026-10-26 08:25 台北）
 - 公開網址（GitHub Pages）：https://elan7192.github.io/knife-sharpen-web/ — repo https://github.com/elan7192/knife-sharpen-web（public，只含 git 追蹤檔，無 GLB）。
 - 重新部署：commit 後 `git push https://github.com/elan7192/knife-sharpen-web.git HEAD:main`（Pages 約 1 分鐘更新）。Vercel 仍卡團隊授權，改走 Pages。
 - 決策紀錄：2026-10-26 08:25 | 決策者：Firstmate（routine dev-12-00，自主） | 理由：Vercel MCP 403 需使用者核准而使用者在睡，GitHub Pages 免費、無需新帳號，使用者早先已同意公開試玩網址 | 證據：iPhone 13 無頭測試 phase=sharpen、無主控台錯誤。
 - 2026-10-26 | who: Firstmate via Grok Bot (gh CLI) | reviewer: 無程式碼變更（僅部署 commit 7f81781），以無頭冒煙測試驗證 | what: 建 public repo 並啟用 GitHub Pages | why: 提供公開試玩網址
+
+## 第 5 輪（2026-10-26 11:05 台北）已完成
+- 場景打磨＋委託多樣化＋音效精修（見 README 變更紀錄）。主寫 Codex gpt-5.6-terra，審查 gpt-6-luna 初審＋重審。
+- 驗證：r5/flow2.json PASS（2 件委託 S、自由模式冰山成功、頓幀 120ms、無錯誤、無捲動）；legacy.json 黑邊 2.39、無外部模型請求。

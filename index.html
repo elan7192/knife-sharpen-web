@@ -123,6 +123,8 @@
     #resultBody b { color: var(--climax-ink); }
     #result .row { justify-content: center; flex-wrap: wrap; row-gap: 8px; }
     #result .row button.hidden { display: none; }
+    .customer-head { display: flex; align-items: center; justify-content: center; gap: 9px; margin: 4px 0 8px; color: var(--climax-muted); font-size: 12px; }
+    .customer-head canvas { width: 46px; height: 46px; border-radius: 50%; border: 2px solid rgba(245,239,230,0.7); background: #F5EFE6; image-rendering: auto; }
     /* Order-mode result: score + rank + breakdown */
     #resultScore { display: flex; align-items: baseline; justify-content: center; gap: 14px; margin: 2px 0 10px; color: var(--climax-ink); }
     #resultScore .rank { font-size: 56px; line-height: 1; font-weight: 700; letter-spacing: 0; }
@@ -155,6 +157,8 @@
     #order .card { background: rgba(11, 13, 18, 0.9); width: min(92vw, 380px); padding: 18px 20px; }
     #order .kicker { font-size: 12px; letter-spacing: 0.3em; color: var(--climax-muted); }
     #order h2 { margin: 4px 0 2px; font-size: 26px; letter-spacing: 0.1em; color: var(--climax-ink); }
+    #order .customer { display: flex; align-items: center; gap: 12px; }
+    #order .customer canvas { width: 62px; height: 62px; border-radius: 50%; border: 2px solid rgba(245,239,230,0.7); background: #F5EFE6; flex: none; }
     #order .from { font-size: 13px; color: var(--climax-muted); }
     #order .quote { margin: 12px 0; font-size: 15px; line-height: 1.6; color: var(--climax-ink); }
     #order dl { margin: 0 0 16px; display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; font-size: 14px; }
@@ -287,6 +291,7 @@
   <div id="result">
     <div class="card">
       <h2 id="resultTitle"></h2>
+      <div id="resultHead" class="customer-head hidden"><canvas id="resultAvatar" aria-label=""></canvas><span id="resultCustomer"></span></div>
       <div id="resultScore" class="hidden"></div>
       <div id="resultBody"></div>
       <div class="row">
@@ -323,8 +328,7 @@
   <div id="order" class="screen" aria-label="委託">
     <div class="card">
       <div class="kicker" id="orderNo">委託</div>
-      <h2 id="orderName"></h2>
-      <div class="from" id="orderFrom"></div>
+      <div class="customer"><canvas id="orderAvatar" aria-label=""></canvas><div><h2 id="orderName"></h2><div class="from" id="orderFrom"></div></div></div>
       <div class="quote" id="orderLine"></div>
       <dl>
         <dt>刀</dt><dd id="orderKnife"></dd>
