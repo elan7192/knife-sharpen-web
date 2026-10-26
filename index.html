@@ -228,6 +228,49 @@
     #capMark { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--ink); opacity: 0.7; }
     #result .row button { padding: 12px 16px; font-size: 16px; letter-spacing: 0.08em; min-width: 0; }
     #flash { position: fixed; inset: 0; pointer-events: none; opacity: 0; }
+
+    /* Round 7 (stability): cards never outgrow a short landscape screen; they scroll instead. */
+    #result .card, #order .card, #sharePreview .card {
+      max-height: calc(100vh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 24px);
+      max-height: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 24px);
+      overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; touch-action: pan-y;
+    }
+    #resultScore .newbest { align-self: center; font-size: 13px; letter-spacing: 0.15em; color: #F4C95D; border: 1px solid rgba(244, 201, 93, 0.6); border-radius: 999px; padding: 2px 10px; }
+    #title .record { margin: -18px 0 22px; font-size: 13px; letter-spacing: 0.12em; color: var(--climax-muted); text-align: center; line-height: 1.6; }
+    .menu-btns .pair { display: flex; gap: 12px; }
+    .menu-btns .pair button { flex: 1; min-width: 0; padding: 12px 8px; font-size: 15px; letter-spacing: 0.1em; }
+    button.link { background: none; box-shadow: none; color: var(--climax-muted); font-size: 12px; letter-spacing: 0.1em; min-height: 44px; min-width: 0; padding: 8px 14px; text-decoration: underline; text-underline-offset: 3px; }
+    #title .foot { display: flex; flex-direction: column; align-items: center; gap: 0; }
+    #title .foot button { pointer-events: auto; }
+    /* Share preview (fallback when the share sheet is unavailable or fails) */
+    #sharePreview { background: rgba(5, 6, 9, 0.86); z-index: 5; }
+    #sharePreview .card { background: rgba(11, 13, 18, 0.92); width: min(92vw, 380px); padding: 14px; text-align: center; }
+    #sharePreview img { display: block; width: 100%; height: auto; max-height: 62vh; object-fit: contain; border-radius: 8px; -webkit-touch-callout: default; -webkit-user-select: auto; user-select: auto; pointer-events: auto; }
+    #sharePreview p { margin: 10px 0 12px; font-size: 13px; letter-spacing: 0.1em; color: var(--climax-muted); }
+    #sharePreview .row { justify-content: center; }
+    a.btn { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; color: var(--accent-ink); background: var(--accent); border-radius: 999px; min-height: 48px; padding: 12px 22px; font-size: 16px; letter-spacing: 0.12em; box-shadow: 0 4px 14px rgba(0,0,0,0.45); pointer-events: auto; }
+    #sharePreview .row button { font-size: 16px; letter-spacing: 0.12em; padding: 12px 22px; min-width: 0; }
+    /* WebGL context lost (iOS reclaims GPU memory in the background) */
+    #glLost { background: rgba(11, 13, 18, 0.94); z-index: 6; text-align: center; }
+    #glLost h2 { margin: 0 0 8px; font-size: 22px; letter-spacing: 0.2em; color: var(--climax-ink); }
+    #glLost p { margin: 0 0 18px; font-size: 14px; line-height: 1.7; color: var(--climax-muted); }
+    #order .resume { margin-top: 4px; font-size: 13px; letter-spacing: 0.08em; color: #9FB7C9; }
+    /* Short landscape (phone on its side): result card in two columns so the buttons stay on screen. */
+    @media (max-height: 520px) and (orientation: landscape) {
+      #result .card { width: min(94vw, 720px); display: grid; grid-template-columns: 1fr 1.3fr; column-gap: 20px; align-items: center; padding: 12px 18px; }
+      #resultTitle { grid-column: 1; grid-row: 1; }
+      #resultHead { grid-column: 1; grid-row: 2; }
+      #resultScore { grid-column: 1; grid-row: 3; }
+      #resultBody { grid-column: 2; grid-row: 1 / span 3; margin-bottom: 4px; text-align: left; font-size: 13px; line-height: 1.55; }
+      #result .card > .row { grid-column: 1 / -1; grid-row: 4; margin-top: 6px; }
+      #result .row button { min-height: 44px; padding: 10px 16px; }
+      .brk div em { display: none !important; }
+    }
+    @media (max-height: 520px) {
+      #title .record { margin: -6px 0 10px; }
+      .menu-btns .pair { flex-direction: row; }
+      #title .foot { flex-direction: row; justify-content: center; gap: 10px; bottom: calc(env(safe-area-inset-bottom) + 2px); }
+    }
     .hidden { display: none !important; }
   </style>
   <script type="importmap">
@@ -289,7 +332,7 @@
   <div id="toast"></div>
 
   <div id="result">
-    <div class="card">
+    <div class="card scroll-y">
       <h2 id="resultTitle"></h2>
       <div id="resultHead" class="customer-head hidden"><canvas id="resultAvatar" aria-label=""></canvas><span id="resultCustomer"></span></div>
       <div id="resultScore" class="hidden"></div>
@@ -319,16 +362,20 @@
     <h1>磨刀</h1>
     <div class="sub">原型・暫定名稱</div>
     <div class="tag">慢慢磨，一刀切開。</div>
+    <div class="record hidden" id="titleRecord"></div>
     <div class="menu-btns">
       <button id="startBtn">開始</button>
       <button id="freeBtn" class="secondary">自由磨刀</button>
-      <button id="hapticBtn" class="secondary">震動：開</button>
+      <div class="pair">
+        <button id="hapticBtn" class="secondary">震動：開</button>
+        <button id="soundBtn" class="secondary">音效：開</button>
+      </div>
     </div>
-    <div class="foot">場景與刀皆為程式生成・無外部素材</div>
+    <div class="foot"><span>場景與刀皆為程式生成・無外部素材</span><button id="resetBtn" class="link hidden">清除紀錄</button></div>
   </div>
 
   <div id="order" class="screen" aria-label="委託">
-    <div class="card">
+    <div class="card scroll-y">
       <div class="kicker" id="orderNo">委託</div>
       <div class="customer"><canvas id="orderAvatar" aria-label=""></canvas><div><h2 id="orderName"></h2><div class="from" id="orderFrom"></div></div></div>
       <div class="quote" id="orderLine"></div>
@@ -341,6 +388,23 @@
         <button id="acceptBtn">接下委託</button>
       </div>
     </div>
+  </div>
+
+  <div id="sharePreview" class="screen" aria-label="成績圖">
+    <div class="card scroll-y">
+      <img id="shareImg" alt="成績圖" />
+      <p>長按圖片即可儲存或分享</p>
+      <div class="row">
+        <a id="shareSave" class="btn" download="knife-score.png" href="#">儲存圖片</a>
+        <button id="shareClose" class="secondary">關閉</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="glLost" class="screen" aria-label="畫面暫停">
+    <h2>畫面暫停中</h2>
+    <p>系統暫時收回了繪圖資源，進度已存好。<br>通常回到前景就會自動恢復。</p>
+    <button id="reloadBtn">重新載入</button>
   </div>
 
   <script type="module" src="./main.js"></script>

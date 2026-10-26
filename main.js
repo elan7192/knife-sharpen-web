@@ -1,11 +1,13 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { createFlowMachine, createSaveStore, shareFileNow, dataURLToBlob } from './stability.js';
 
 // ---------------------------------------------------------------------------
 // URL options
 //   ?time=day|dusk  force a palette (default: dusk between 17:00 and 06:00)
 //   ?demo=0.8       debug: start with that sharpness and run the test cut immediately
+//   ?fresh=1        ignore the save (nothing is read or written)
 // Everything in the scene is procedural geometry: no model, texture or HDRI files are loaded.
 // ---------------------------------------------------------------------------
 const params = new URLSearchParams(location.search);
@@ -189,10 +191,15 @@ const skyMat = new THREE.ShaderMaterial({
 scene.add(new THREE.Mesh(new THREE.SphereGeometry(35, 24, 12), skyMat));
 
 // Procedural IBL so the metal has something to reflect (no external HDRI).
-const pmrem = new THREE.PMREMGenerator(renderer);
-scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+// Rebuilt after a WebGL context restore (the old render-target texture is gone with the context).
+function buildEnvironment() {
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  scene.environment?.dispose();
+  scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+  pmrem.dispose();
+}
+buildEnvironment();
 scene.environmentIntensity = P.envI;
-pmrem.dispose();
 
 const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.02, 80);
 
@@ -939,18 +946,25 @@ function burst(system, at, n, speed, colors, life) {
 // ---------------------------------------------------------------------------
 const audio = {
   ctx: null,
+  muted: false,
+  /** Settings toggle: fades the master bus (the context and its loops keep running). */
+  setMuted(m) {
+    this.muted = !!m;
+    if (this.master) this.master.gain.setTargetAtTime(this.muted ? 0 : 0.8, this.ctx.currentTime, 0.03);
+  },
   // Must be called from a user-activation event (pointerup / touchend / click / keydown);
   // touchstart does not count on iOS Safari or Chrome.
   unlock() {
     if (this.ctx) {
-      if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume().catch(() => {});
+      // 'interrupted' (iOS: phone call, Siri) needs a resume from a gesture just like 'suspended'.
+      if (this.ctx.state !== 'running' && this.ctx.state !== 'closed' && !document.hidden) this.ctx.resume().catch(() => {});
       return;
     }
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return;
     const ctx = (this.ctx = new AC());
     this.master = ctx.createGain();
-    this.master.gain.value = 0.8;
+    this.master.gain.value = this.muted ? 0 : 0.8;
     this.master.connect(ctx.destination);
 
     const len = ctx.sampleRate * 2;
@@ -1151,11 +1165,12 @@ const audio = {
 // ---------------------------------------------------------------------------
 // Tweens
 // ---------------------------------------------------------------------------
+const debugFlags = { breakTween: false, throwFrame: false }; // window.__knife.debug
 const tweens = new Set();
 let timeScale = 1; // < 1 during the test-cut slow motion
 /** real = advance on wall-clock time (ignores slow motion and the hitstop freeze). */
 function tween(duration, fn, ease = (t) => t, real = false) {
-  return new Promise((resolve) => tweens.add({ t: 0, duration, fn, ease, resolve, real }));
+  return new Promise((resolve, reject) => tweens.add({ t: 0, duration, fn, ease, resolve, reject, real }));
 }
 const wait = (s) => tween(s, () => {});
 const waitReal = (s) => tween(s, () => {}, undefined, true);
@@ -1163,7 +1178,15 @@ function updateTweens(gameDt, realDt) {
   for (const tw of tweens) {
     tw.t += tw.real ? realDt : gameDt;
     const k = Math.min(1, tw.t / tw.duration);
-    tw.fn(tw.ease(k));
+    try {
+      if (debugFlags.breakTween) { debugFlags.breakTween = false; throw new Error('debug: broken tween'); }
+      tw.fn(tw.ease(k));
+    } catch (e) {
+      // Drop it so it can't throw every frame; the awaiting flow (e.g. the cut) gets the error and recovers.
+      tweens.delete(tw);
+      tw.reject(e);
+      continue;
+    }
     if (k >= 1) {
       tweens.delete(tw);
       tw.resolve();
@@ -1211,18 +1234,45 @@ const ui = {
   orderAvatar: $('orderAvatar'), resultAvatar: $('resultAvatar'), resultCustomer: $('resultCustomer'), resultHead: $('resultHead'),
   resultScore: $('resultScore'), retryBtn: $('retryBtn'), nextOrderBtn: $('nextOrderBtn'), titleBtn: $('titleBtn'),
   shareBtn: $('shareBtn'), hapticBtn: $('hapticBtn'),
+  soundBtn: $('soundBtn'), resetBtn: $('resetBtn'), titleRecord: $('titleRecord'), glLost: $('glLost'), reloadBtn: $('reloadBtn'),
+  sharePreview: $('sharePreview'), shareImg: $('shareImg'), shareSave: $('shareSave'), shareClose: $('shareClose'),
 };
-let hapticsEnabled = true;
-try {
-  const savedHaptics = localStorage.getItem('knife.haptics');
-  if (savedHaptics === '0') hapticsEnabled = false;
-} catch (_) {}
+
+// ---------------------------------------------------------------------------
+// Errors and save (stability.js). Recovered problems are kept in window.__knife.issues.
+// ---------------------------------------------------------------------------
+const issues = [];
+function reportIssue(kind, err) {
+  const msg = String(err && (err.stack || err.message) ? err.message || err.stack : err).slice(0, 300);
+  const last = issues[issues.length - 1];
+  if (last && last.kind === kind && last.msg === msg) last.count++;
+  else if (issues.length < 50) issues.push({ kind, msg, count: 1, t: Math.round(performance.now()) });
+  console.warn(`[knife] ${kind}:`, err);
+}
+window.addEventListener('error', (e) => reportIssue('error', e.error || e.message));
+window.addEventListener('unhandledrejection', (e) => reportIssue('promise', e.reason));
+
+const save = createSaveStore({
+  shape: { segs: SEGS, targets: TARGETS.length, stones: STONES.map((d) => ({ id: d.id, cols: WEAR_COLS + 1 })) },
+  ignore: params.has('fresh'),
+  onError: (e) => reportIssue('save', e),
+});
+let hapticsEnabled = save.data.settings.haptics;
+audio.setMuted(!save.data.settings.sound);
 function updateHapticButton() {
   ui.hapticBtn.textContent = `震動：${hapticsEnabled ? '開' : '關'}`;
+  ui.soundBtn.textContent = `音效：${audio.muted ? '關' : '開'}`;
 }
 function setHaptics(enabled) {
   hapticsEnabled = !!enabled;
-  try { localStorage.setItem('knife.haptics', hapticsEnabled ? '1' : '0'); } catch (_) {}
+  save.data.settings.haptics = hapticsEnabled;
+  save.save(0);
+  updateHapticButton();
+}
+function setSound(enabled) {
+  audio.setMuted(!enabled);
+  save.data.settings.sound = !!enabled;
+  save.save(0);
   updateHapticButton();
 }
 function haptic(pattern) {
@@ -1330,6 +1380,14 @@ const flow = {
   ready: false, // order mode: sharpness has reached the order's requirement
   result: null, // last order result { success, score, rank, parts }
 };
+// Every flow.screen change goes through goScreen(): legal edges are FLOW_EDGES in stability.js;
+// an illegal one is still applied (never soft-lock the player) but lands in __knife.issues for tests.
+// game.mode is the sub-state of the sharpen/cut/result screens: sharpen | test | result | exit.
+const fsm = createFlowMachine('title', (from, to, why) => reportIssue('flow', `${from} → ${to}${why ? ` (${why})` : ''}`));
+function goScreen(to, why) {
+  fsm.check(flow.screen, to, why);
+  flow.screen = to;
+}
 // Per-order grinding stats (edge units travelled while grinding; 1 = one full pass along the edge)
 const stats = { dist: 0, angleDist: 0, pressDist: 0, strokes: 0, goalDist: -1 }; // goalDist: dist when the margin goal was reached
 const seg = {
@@ -1436,7 +1494,8 @@ window.addEventListener('keydown', (e) => {
 // iOS Safari: block pinch / double-tap zoom and rubber-band scrolling.
 for (const type of ['gesturestart', 'gesturechange', 'gestureend']) document.addEventListener(type, (e) => e.preventDefault());
 document.addEventListener('dblclick', (e) => e.preventDefault());
-document.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
+// Cards marked .scroll-y may scroll (result card on a short landscape screen); nothing else moves.
+document.addEventListener('touchmove', (e) => { if (!e.target.closest?.('.scroll-y')) e.preventDefault(); }, { passive: false });
 let lastTouchEnd = 0;
 document.addEventListener('touchend', (e) => {
   const now = performance.now();
@@ -1488,7 +1547,25 @@ onButton(ui.titleBtn, () => showTitle());
 onButton(ui.hapticBtn, () => {
   setHaptics(!hapticsEnabled);
 });
-onButton(ui.shareBtn, () => { shareScore().catch(() => {}); });
+// No await before navigator.share() in here (iOS gesture); see shareScore().
+onButton(ui.shareBtn, () => { shareScore().catch((e) => reportIssue('share', e)); });
+onButton(ui.shareClose, () => hideSharePreview());
+onButton(ui.soundBtn, () => setSound(audio.muted));
+onButton(ui.reloadBtn, () => { save.flush(); location.reload(); });
+let resetArmed = 0;
+onButton(ui.resetBtn, () => {
+  // Two taps within 3 s: the first one only arms the button.
+  if (!resetArmed) {
+    ui.resetBtn.textContent = '再點一次確認清除';
+    resetArmed = setTimeout(() => { resetArmed = 0; ui.resetBtn.textContent = '清除紀錄'; }, 3000);
+    return;
+  }
+  clearTimeout(resetArmed);
+  resetArmed = 0;
+  ui.resetBtn.textContent = '清除紀錄';
+  resetProgress();
+  toast('紀錄已清除', 1.2);
+});
 stoneBtns.forEach((b, i) => b.addEventListener('click', () => { audio.unlock(); if (flow.screen === 'sharpen') selectStone(i); }));
 targetBtns.forEach((b, i) => b.addEventListener('click', () => {
   audio.unlock();
@@ -2229,6 +2306,15 @@ async function slashFail(target, sHigh) {
  * opts.fail forces the bounce. Resolves with { id, success } (null if a cut is already running).
  */
 async function runTest(id, opts = {}) {
+  try {
+    return await runCut(id, opts);
+  } catch (e) {
+    reportIssue('cut', e);
+    recoverToSharpen('cut');
+    return null;
+  }
+}
+async function runCut(id, opts = {}) {
   // A result-card exit is still unwinding the prior cinematic; never overlap cuts.
   if (game.mode === 'test' || game.mode === 'exit') return null;
   if (game.mode !== 'sharpen' && game.mode !== 'result') return null;
@@ -2243,7 +2329,7 @@ async function runTest(id, opts = {}) {
   const success = !opts.fail && game.sharpness >= def.need - 1e-6;
   ui.result.classList.remove('show');
   game.mode = 'test';
-  flow.screen = 'cut';
+  goScreen('cut', 'runTest');
   cine.phase = 'enter';
   cine.target = id;
   cine.lastHitstopMs = 0;
@@ -2289,7 +2375,7 @@ function showResult(idx, success) {
   const def = TARGETS[idx];
   game.mode = 'result';
   cine.phase = 'result';
-  flow.screen = 'result';
+  goScreen('result', 'showResult');
   const before = game.sharpness;
   if (success) {
     game.best = Math.max(game.best, idx);
@@ -2300,6 +2386,7 @@ function showResult(idx, success) {
   if (isOrder) {
     showOrderResult(def, success, before);
     cine.lastResult = { id: def.id, success, sharpness: game.sharpness, hitstopMs: cine.lastHitstopMs, score: flow.result.score, rank: flow.result.rank };
+    afterResult(def, success, before);
     return cine.lastResult;
   }
   const pct = Math.round(game.sharpness * 100);
@@ -2325,6 +2412,7 @@ function showResult(idx, success) {
   refreshTargets();
   ui.result.classList.add('show');
   cine.lastResult = { id: def.id, success, sharpness: game.sharpness, hitstopMs: cine.lastHitstopMs };
+  afterResult(def, success, before);
   return cine.lastResult;
 }
 
@@ -2385,65 +2473,286 @@ function setResultButtons(isOrder, success) {
   }
 }
 
-/** Capture the current scene and add the result text without keeping a drawing buffer alive. */
-async function makeScoreBlob() {
-  try {
-    renderer.render(scene, camera);
-    const source = renderer.domElement;
-    const capture = document.createElement('canvas');
-    capture.width = source.width;
-    capture.height = source.height;
-    if (!capture.width || !capture.height) return null;
-    const ctx = capture.getContext('2d');
-    if (!ctx) return null;
-    ctx.drawImage(source, 0, 0);
-    const scale = Math.max(1, capture.width / Math.max(1, window.innerWidth));
-    const title = ui.resultTitle.textContent.trim() || '磨刀成績';
-    const score = ui.resultScore.classList.contains('hidden') ? '' : ui.resultScore.textContent.trim();
-    const resultTarget = TARGETS.find((item) => item.id === cine.lastResult?.id);
-    const target = resultTarget?.name || TARGETS[cutIdx()]?.name || '';
-    const detail = ui.resultBody.textContent.trim().replace(/\s+/g, ' ').slice(0, 78);
-    const bandH = Math.min(capture.height * 0.42, 150 * scale);
-    ctx.fillStyle = 'rgba(8, 10, 14, 0.78)';
-    ctx.fillRect(0, capture.height - bandH, capture.width, bandH);
-    ctx.fillStyle = '#F5EFE6';
-    ctx.textBaseline = 'top';
-    ctx.font = `600 ${14 * scale}px sans-serif`;
-    ctx.fillText('研刃 · 磨刀', 20 * scale, capture.height - bandH + 16 * scale);
-    ctx.font = `700 ${28 * scale}px sans-serif`;
-    ctx.fillText(title, 20 * scale, capture.height - bandH + 38 * scale);
-    ctx.font = `500 ${16 * scale}px sans-serif`;
-    ctx.fillStyle = '#D7DDE5';
-    ctx.fillText(`${score ? `${score}・` : ''}目標：${target}`, 20 * scale, capture.height - bandH + 76 * scale);
-    if (detail) {
-      ctx.font = `400 ${12 * scale}px sans-serif`;
-      ctx.fillText(detail, 20 * scale, capture.height - bandH + 102 * scale, capture.width - 40 * scale);
-    }
-    return await new Promise((resolve) => capture.toBlob(resolve, 'image/png'));
-  } catch (_) {
-    return null;
+// ---------------------------------------------------------------------------
+// Share card (分享成績): a 1080×1350 card = the visible 2.39:1 cinematic frame + the result.
+// It is pre-built as soon as the result card shows, so the tap calls navigator.share() at once:
+// iOS Safari drops the user gesture after any await (see shareFileNow in stability.js).
+// ---------------------------------------------------------------------------
+const SHARE_W = 1080;
+const SHARE_H = 1350;
+const SHARE_NAME = 'knife-score.png';
+const SHARE_FONT = '"PingFang TC", "Noto Sans TC", "Microsoft JhengHei", "WenQuanYi Zen Hei", sans-serif';
+let resultSerial = 0; // bumps on every result card; the cached image is only used for the same card
+let shareData = null;
+let shareCache = { key: -1, blob: null, file: null };
+const shareLog = { prebuilt: 0, taps: 0, last: null };
+
+function spacedText(g, text, x, y, spacing) {
+  for (const ch of text) {
+    g.fillText(ch, x, y);
+    x += g.measureText(ch).width + spacing;
   }
+  return x;
+}
+/** Character wrap (CJK has no spaces); the last kept line gets an ellipsis when text is cut. */
+function wrapText(g, text, maxW, maxLines) {
+  const lines = [];
+  let line = '';
+  for (const ch of text) {
+    if (line && g.measureText(line + ch).width > maxW) {
+      lines.push(line);
+      line = '';
+    }
+    line += ch;
+  }
+  if (line) lines.push(line);
+  if (lines.length > maxLines) {
+    lines.length = maxLines;
+    lines[maxLines - 1] = `${lines[maxLines - 1].slice(0, -1)}…`;
+  }
+  return lines;
+}
+function roundRect(g, x, y, w, h, r) {
+  g.beginPath();
+  g.moveTo(x + r, y);
+  g.arcTo(x + w, y, x + w, y + h, r);
+  g.arcTo(x + w, y + h, x, y + h, r);
+  g.arcTo(x, y + h, x, y, r);
+  g.arcTo(x, y, x + w, y, r);
+  g.closePath();
 }
 
-async function shareScore() {
-  const blob = await makeScoreBlob();
-  if (!blob) return null;
-  try {
-    const file = new File([blob], 'knife-score.png', { type: 'image/png' });
-    if (navigator.canShare && navigator.canShare({ files: [file] })) {
-      try { await navigator.share({ files: [file], title: '磨刀成績' }); } catch (_) {}
-      return blob;
+/** Remember what the result card says, in data form, for the share card. */
+function setShareData(def, success, sharp) {
+  const isOrder = flow.mode === 'order' && flow.order && flow.result && TARGETS[flow.order.targetIdx] === def;
+  const o = flow.order, r = isOrder ? flow.result : null;
+  const rec = save.data.records;
+  shareData = {
+    order: isOrder, success, target: def.name, sharp, need: def.need,
+    rank: r ? r.rank : RANKS[game.best + 1], score: r ? r.score : null,
+    parts: r ? r.parts : null, newBest: !!(r && r.newBest), bestScore: rec.bestScore,
+    quote: isOrder
+      ? success ? `「${o.reaction || RANK_LINES[r.rank]}」` : '「沒關係，再磨一下就好。」'
+      : success ? (TARGETS.indexOf(def) === TARGETS.length - 1 ? '連冰山都一刀兩斷，傳說中的名匠。' : '刃口亮了，下一個目標更硬。') : '刀被彈開了，再磨利一點。',
+    who: isOrder ? `${o.customer}・${o.from}` : '自由磨刀',
+  };
+}
+
+/** Synchronous: render one frame and compose the share card. Null when there is no result yet. */
+function drawScoreCanvas() {
+  const d = shareData;
+  if (!d) return null;
+  renderer.render(scene, camera); // the drawing buffer is only valid inside this task
+  const src = renderer.domElement;
+  const c = document.createElement('canvas');
+  c.width = SHARE_W;
+  c.height = SHARE_H;
+  const g = c.getContext('2d');
+  if (!g || !src.width || !src.height) return null;
+  const M = 72;
+  const bg = g.createLinearGradient(0, 0, 0, SHARE_H);
+  bg.addColorStop(0, '#0B0D12');
+  bg.addColorStop(1, '#161B25');
+  g.fillStyle = bg;
+  g.fillRect(0, 0, SHARE_W, SHARE_H);
+
+  // Kicker + date
+  g.textBaseline = 'alphabetic';
+  g.fillStyle = '#808C9A';
+  g.font = `500 26px ${SHARE_FONT}`;
+  spacedText(g, d.order ? '委託・試刀紀錄' : '自由磨刀・試刀紀錄', M, 112, 8);
+  const now = new Date();
+  g.textAlign = 'right';
+  g.fillText(`${now.getFullYear()}.${String(now.getMonth() + 1).padStart(2, '0')}.${String(now.getDate()).padStart(2, '0')}`, SHARE_W - M, 112);
+  g.textAlign = 'left';
+
+  // Cinematic strip: exactly the part of the frame between the letterbox bars, cover-fitted.
+  const stripW = SHARE_W - 2 * M, stripH = Math.round(stripW / LETTERBOX_ASPECT), stripY = 148;
+  const sx = src.width / Math.max(1, window.innerWidth), sy = src.height / Math.max(1, window.innerHeight);
+  const vx = cine.barH * sx, vy = cine.barV * sy, vw = src.width - 2 * vx, vh = src.height - 2 * vy;
+  const k = Math.max(stripW / vw, stripH / vh), cw = stripW / k, ch = stripH / k;
+  g.fillStyle = '#000';
+  g.fillRect(M, stripY, stripW, stripH);
+  g.drawImage(src, vx + (vw - cw) / 2, vy + (vh - ch) / 2, cw, ch, M, stripY, stripW, stripH);
+  g.strokeStyle = 'rgba(247, 247, 242, 0.16)';
+  g.lineWidth = 2;
+  g.strokeRect(M + 1, stripY + 1, stripW - 2, stripH - 2);
+
+  // Target + verdict
+  g.fillStyle = '#F7F7F2';
+  g.font = `700 112px ${SHARE_FONT}`;
+  spacedText(g, d.target, M - 4, 700, 18);
+  g.font = `500 40px ${SHARE_FONT}`;
+  g.fillStyle = d.success ? '#E8F1F8' : '#9FB7C9';
+  spacedText(g, d.success ? '一刀兩斷' : '彈開了', M, 772, 16);
+
+  // Seal (印): rank in order mode, title in free mode
+  const sealText = d.success ? d.rank : '再磨';
+  const sealColor = !d.success ? '#3E4A61' : d.rank === 'S' || d.rank === '神品' || d.rank === '名刀' ? '#B04A33' : d.rank === 'A' || d.rank === '利刃' ? '#A8643C' : '#5C5650';
+  g.save();
+  g.translate(SHARE_W - M - 100, 690);
+  g.rotate(-0.07);
+  g.fillStyle = sealColor;
+  roundRect(g, -100, -100, 200, 200, 22);
+  g.fill();
+  g.strokeStyle = 'rgba(245, 239, 230, 0.55)';
+  g.lineWidth = 3;
+  roundRect(g, -86, -86, 172, 172, 14);
+  g.stroke();
+  g.fillStyle = '#F5EFE6';
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.font = `700 ${sealText.length > 1 ? 70 : 128}px ${SHARE_FONT}`;
+  g.fillText(sealText, 0, sealText.length > 1 ? 4 : 8);
+  g.restore();
+  g.textAlign = 'left';
+  g.textBaseline = 'alphabetic';
+
+  // Score (order) or sharpness (free)
+  let x;
+  if (d.order && d.success) {
+    g.fillStyle = '#F7F7F2';
+    g.font = `700 104px ${SHARE_FONT}`;
+    g.fillText(String(d.score), M, 880);
+    x = M + g.measureText(String(d.score)).width + 12;
+    g.font = `500 36px ${SHARE_FONT}`;
+    g.fillStyle = '#808C9A';
+    g.fillText('分', x, 880);
+    x += 60;
+  } else {
+    g.fillStyle = '#F7F7F2';
+    g.font = `700 76px ${SHARE_FONT}`;
+    g.fillText(`${Math.round(d.sharp * 100)}%`, M, 880);
+    x = M + g.measureText(`${Math.round(d.sharp * 100)}%`).width + 18;
+    g.font = `500 32px ${SHARE_FONT}`;
+    g.fillStyle = '#808C9A';
+    g.fillText(d.success ? '鋒利度' : `需要 ${Math.round(d.need * 100)}%`, x, 880);
+    x += 160;
+  }
+  if (d.newBest) {
+    g.fillStyle = '#F4C95D';
+    g.font = `700 32px ${SHARE_FONT}`;
+    spacedText(g, '★ 新紀錄', x, 880, 4);
+  }
+
+  // Quote
+  g.fillStyle = '#F5EFE6';
+  g.font = `400 34px ${SHARE_FONT}`;
+  const ql = wrapText(g, d.quote, SHARE_W - 2 * M, 2);
+  ql.forEach((l, i) => g.fillText(l, M, 950 + i * 48));
+  g.fillStyle = '#808C9A';
+  g.font = `400 26px ${SHARE_FONT}`;
+  g.fillText(`— ${d.who}`, M, 950 + ql.length * 48 + 4);
+
+  // Breakdown bars (order) or the sharpness bar against the target's requirement (free)
+  const rows = d.order && d.parts
+    ? [['鋒利度', d.parts.margin], ['角度準確', d.parts.angle], ['壓力適中', d.parts.pressure], ['效率', d.parts.efficiency]]
+      .map(([label, p]) => ({ label, ratio: d.success ? p.pts / p.max : p.ratio, right: d.success ? `${p.pts}/${p.max}` : `${Math.round(p.ratio * 100)}%` }))
+    : [{ label: '鋒利度', ratio: d.sharp, right: `${Math.round(d.sharp * 100)}%`, mark: d.need }];
+  let y = 1072 + (4 - rows.length) * 26;
+  for (const row of rows) {
+    g.fillStyle = '#808C9A';
+    g.font = `400 26px ${SHARE_FONT}`;
+    g.fillText(row.label, M, y);
+    g.textAlign = 'right';
+    g.fillStyle = '#F7F7F2';
+    g.fillText(row.right, SHARE_W - M, y);
+    g.textAlign = 'left';
+    const bx = M + 170, bw = SHARE_W - 2 * M - 170 - 110;
+    g.fillStyle = 'rgba(128, 140, 154, 0.25)';
+    roundRect(g, bx, y - 14, bw, 8, 4);
+    g.fill();
+    g.fillStyle = row.ratio >= 0.999 ? '#F4C95D' : '#E8F1F8';
+    roundRect(g, bx, y - 14, Math.max(8, bw * clamp(row.ratio, 0, 1)), 8, 4);
+    g.fill();
+    if (row.mark > 0) {
+      g.fillStyle = '#D7263D';
+      g.fillRect(bx + bw * row.mark - 1, y - 22, 3, 24);
     }
-  } catch (_) {}
-  try {
-    const link = document.createElement('a');
-    const url = URL.createObjectURL(blob);
-    link.href = url;
-    link.download = 'knife-score.png';
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  } catch (_) {}
-  return blob;
+    y += 52;
+  }
+
+  // Footer
+  g.fillStyle = 'rgba(128, 140, 154, 0.3)';
+  g.fillRect(M, SHARE_H - 86, SHARE_W - 2 * M, 1);
+  g.fillStyle = '#F5EFE6';
+  g.font = `600 28px ${SHARE_FONT}`;
+  spacedText(g, '研刃・磨刀', M, SHARE_H - 40, 6);
+  g.fillStyle = '#808C9A';
+  g.font = `400 22px ${SHARE_FONT}`;
+  g.textAlign = 'right';
+  g.fillText('原型・場景與刀皆為程式生成', SHARE_W - M, SHARE_H - 40);
+  g.textAlign = 'left';
+  return c;
+}
+
+function shareFile(blob) {
+  try { return new File([blob], SHARE_NAME, { type: 'image/png' }); } catch (_) { return null; } // old WebKit: no File()
+}
+
+/** Build the PNG in the background while the player reads the result card. */
+function prepareShare() {
+  const key = resultSerial;
+  shareCache = { key, blob: null, file: null };
+  setTimeout(() => {
+    if (key !== resultSerial || flow.screen !== 'result') return;
+    try {
+      const c = drawScoreCanvas();
+      c?.toBlob((blob) => {
+        if (!blob || key !== resultSerial || shareCache.file) return;
+        shareCache = { key, blob, file: shareFile(blob) };
+        shareLog.prebuilt++;
+      }, 'image/png');
+    } catch (e) {
+      reportIssue('share', e);
+    }
+  }, 80);
+}
+
+/**
+ * Tap handler body; must stay synchronous up to navigator.share(). Uses the pre-built file, or
+ * (tap faster than the encode) builds one right here with toDataURL. Non-AbortError failures and
+ * browsers without file sharing get the preview sheet (long-press to save + a download link).
+ */
+function shareScore() {
+  shareLog.taps++;
+  let { blob, file } = shareCache.key === resultSerial ? shareCache : { blob: null, file: null };
+  const prebuilt = !!blob;
+  if (!blob) {
+    const c = drawScoreCanvas();
+    if (!c) {
+      toast('還沒有成績可以分享', 1.2);
+      return Promise.resolve('none');
+    }
+    blob = dataURLToBlob(c.toDataURL('image/png'));
+    file = shareFile(blob);
+    shareCache = { key: resultSerial, blob, file };
+  }
+  const d = shareData;
+  const text = `磨刀成績：${d.target}・${d.success ? '一刀兩斷' : '彈開了'}${d.order && d.success ? `・${d.rank} ${d.score} 分` : ''}`;
+  const entry = (shareLog.last = { prebuilt, result: 'pending', error: null });
+  return shareFileNow(file, { title: '磨刀成績', text }, (err) => {
+    entry.error = err ? err.name || String(err) : null;
+    showSharePreview(blob);
+  }).then((how) => (entry.result = how));
+}
+
+let previewUrl = '';
+function showSharePreview(blob) {
+  if (previewUrl) URL.revokeObjectURL(previewUrl);
+  previewUrl = URL.createObjectURL(blob);
+  ui.shareImg.src = previewUrl;
+  ui.shareSave.href = previewUrl;
+  ui.sharePreview.classList.add('show');
+  if (!isMobile) {
+    try { ui.shareSave.click(); } catch (_) {} // desktop: download at once; phones: long-press or tap 儲存圖片
+  }
+}
+function hideSharePreview() {
+  ui.sharePreview.classList.remove('show');
+  ui.shareImg.removeAttribute('src');
+  if (previewUrl) URL.revokeObjectURL(previewUrl);
+  previewUrl = '';
 }
 
 /** Ideal full passes (perfect angle and pressure, best stone each pass) to raise the edge from -> to. */
@@ -2495,7 +2804,7 @@ function scoreOrder(sharp, need, success) {
 
 async function backToSharpen(reset) {
   if (game.mode !== 'result') return;
-  if (flow.screen === 'result') flow.screen = 'sharpen';
+  if (flow.screen === 'result') goScreen('sharpen', 'back');
   game.mode = 'exit';
   cine.phase = 'exit';
   ui.result.classList.remove('show');
@@ -2539,6 +2848,162 @@ async function backToSharpen(reset) {
 }
 
 // ---------------------------------------------------------------------------
+// Save: what persists (stability.js validates it on load)
+//   progress.completed  successful orders     progress.best / unlocked  free-mode best cut / unlocks
+//   progress.knife      the free-mode edge    progress.wear             each stone's dish
+//   records             best score, rank counts, cuts per target        settings  haptics / sound
+// Orders always start from a dull edge, so only the free-mode edge is kept. The edge is shared by
+// both modes, so it is stashed when an order takes the knife and put back when free mode returns.
+// ---------------------------------------------------------------------------
+let knifeOwner = 'free'; // 'free' | 'order': whose edge seg.progress currently holds
+const r3 = (v) => Math.round(v * 1000) / 1000;
+
+function stashFreeKnife() {
+  const p = save.data.progress;
+  p.knife = { segs: Array.from(seg.progress, r3), stone: game.stone };
+  p.unlocked = game.unlocked;
+}
+/** Put a saved free-mode edge (or a fresh dull one) back on the knife. */
+/** Put a saved edge on the knife (levels are recomputed silently: no dings for old progress). */
+function applyEdge(segs, stone) {
+  seg.progress.set(segs);
+  for (let i = 0; i < SEGS; i++) seg.level[i] = SEG_LEVELS.filter((l) => seg.progress[i] >= l - 1e-6).length;
+  seg.flash.fill(0);
+  recomputeSharpness();
+  game.stage = Math.min(...seg.level);
+  setKnifeFinish(game.sharpness);
+  selectStone(stone, true);
+}
+function applyFreeKnife() {
+  const p = save.data.progress;
+  if (p.knife) {
+    applyEdge(p.knife.segs, p.knife.stone);
+  } else {
+    setSharpness(0);
+  }
+  game.unlocked = 0;
+  while (game.unlocked < TARGETS.length - 1 && game.sharpness >= TARGETS[game.unlocked + 1].need - 1e-6) game.unlocked++;
+  game.unlocked = Math.max(game.unlocked, p.unlocked); // unlocks are sticky
+  game.selected = game.unlocked;
+  game.shortMask = -1; // relabel the chips on the next unlock check
+  knifeOwner = 'free';
+  refreshTargets();
+}
+/** Copy the live state into the save; immediate = write now (result, page hide), else coalesce. */
+function captureSave(immediate = false) {
+  const p = save.data.progress;
+  p.completed = flow.completed;
+  p.best = game.best;
+  if (knifeOwner === 'free') stashFreeKnife();
+  // An unfinished order keeps its edge and stats, so a reload (or iOS killing the tab) resumes it.
+  if (knifeOwner === 'order' && flow.order && !flow.order.done) {
+    p.order = { no: flow.order.no, segs: Array.from(seg.progress, r3), stone: game.stone, stats: { ...stats } };
+  } else if (flow.order && flow.order.done) p.order = null;
+  for (const s of stones) p.wear[s.def.id] = Array.from(s.wear, (w) => Math.round(w * 10000) / 10000);
+  if (immediate) {
+    save.save();
+    save.flush();
+  } else save.save(1500);
+}
+function restoreSave() {
+  const p = save.data.progress;
+  flow.completed = p.completed;
+  game.best = p.best;
+  for (const s of stones) {
+    const w = p.wear[s.def.id];
+    if (w) {
+      s.wear.set(w);
+      applyStoneWear(s);
+    }
+  }
+  applyFreeKnife();
+  updateTitleRecord();
+}
+function resetProgress() {
+  save.reset();
+  flow.completed = 0;
+  flow.order = null;
+  knifeOwner = 'free';
+  game.best = -1;
+  for (const s of stones) {
+    s.wear.fill(0);
+    s.wet01 = s.slurry01 = 0;
+    applyStoneWear(s);
+  }
+  selectStone(0, true);
+  applyFreeKnife();
+  updateTitleRecord();
+}
+function updateTitleRecord() {
+  const n = flow.completed, rec = save.data.records;
+  ui.startBtn.textContent = n > 0 ? `繼續・第 ${n + 1} 件` : '開始';
+  const parts = [];
+  if (n > 0) parts.push(`已完成 ${n} 件委託`);
+  if (save.data.progress.order && save.data.progress.order.no === n + 1) parts.push('有一件委託磨到一半');
+  if (rec.bestScore != null) parts.push(`最佳 ${rec.bestRank}・${rec.bestScore} 分`);
+  if (game.best >= 0) parts.push(`最高斬過 ${TARGETS[game.best].name}`);
+  ui.titleRecord.textContent = parts.join('　');
+  ui.titleRecord.classList.toggle('hidden', !parts.length);
+  ui.resetBtn.classList.toggle('hidden', !parts.length && save.status !== 'recovered');
+}
+
+/** Every result card: records, save, and start building the share image. */
+function afterResult(def, success, before) {
+  resultSerial++;
+  const rec = save.data.records;
+  const r = flow.mode === 'order' && flow.result && flow.order && TARGETS[flow.order.targetIdx] === def ? flow.result : null;
+  if (success) {
+    rec.cuts[def.id] = (rec.cuts[def.id] || 0) + 1;
+    if (r && r.score != null && !r.counted) {
+      r.counted = true;
+      rec.ranks[r.rank] = (rec.ranks[r.rank] || 0) + 1;
+      if (rec.bestScore == null || r.score > rec.bestScore) {
+        r.newBest = rec.bestScore != null; // the very first score is not news
+        rec.bestScore = r.score;
+        rec.bestRank = r.rank;
+      }
+    }
+  }
+  if (r && r.newBest) ui.resultScore.insertAdjacentHTML('beforeend', '<span class="newbest">★ 新紀錄</span>');
+  setShareData(def, success, before);
+  captureSave(true);
+  prepareShare();
+}
+
+/**
+ * Error recovery: a cut that threw (or the watchdog) brings the game back to a playable
+ * sharpening screen. Pending tweens are dropped, so the broken async chain never resumes.
+ */
+function recoverToSharpen(reason) {
+  tweens.clear();
+  hitstop = 0;
+  shake = 0;
+  timeScale = 1;
+  camBlend = 0;
+  cine.bars = 0;
+  cine.phase = 'idle';
+  cine.target = null;
+  stoneSwitching = false;
+  stoneSwap = null;
+  placeStones(game.stone);
+  chopRig.visible = false;
+  flashEl.style.opacity = 0;
+  releaseInput();
+  document.body.classList.remove('cine');
+  ui.result.classList.remove('show');
+  ui.hud.classList.remove('hidden');
+  ui.slider.classList.remove('hidden');
+  ui.testBtn.disabled = false;
+  game.mode = 'sharpen';
+  if (flow.mode) goScreen('sharpen', `recover:${reason}`);
+  else setScreen('title');
+  refreshTargets();
+  showStageTarget(cutIdx());
+  lifecycle.recoveries++;
+  toast('剛剛卡了一下，已回到磨刀台', 1.6);
+}
+
+// ---------------------------------------------------------------------------
 // Flow screens: title -> order card -> sharpen -> cut -> result
 // ---------------------------------------------------------------------------
 function releaseInput() {
@@ -2548,7 +3013,7 @@ function releaseInput() {
 }
 
 function setScreen(screen) {
-  flow.screen = screen;
+  goScreen(screen, 'setScreen');
   ui.title.classList.toggle('show', screen === 'title');
   ui.order.classList.toggle('show', screen === 'order');
   document.body.classList.toggle('menu', screen === 'title' || screen === 'order');
@@ -2577,9 +3042,11 @@ function leaveResult() {
 
 function showTitle() {
   if (game.mode === 'test') return;
+  captureSave(true);
   setScreen('title');
   setFlowMode(null);
   leaveResult();
+  updateTitleRecord();
 }
 
 /** Show the next order card (difficulty = completed orders, clamped at the last target). */
@@ -2597,6 +3064,11 @@ function startOrder() {
   ui.orderLine.textContent = `「${c.line}」`;
   ui.orderKnife.textContent = c.knife;
   ui.orderTarget.innerHTML = `切開 <b>${t.name}</b>（${t.need > 0 ? `鋒利度需 ${Math.round(t.need * 100)}%` : '暖身：輕鬆磨一磨就好'}）`;
+  // Unfinished order from an earlier visit: same customer, same edge.
+  const resume = save.data.progress.order;
+  const resumeSharp = resume && resume.no === no + 1 ? resume.segs.reduce((a, b) => a + b, 0) / SEGS : -1;
+  if (resumeSharp >= 0) ui.orderTarget.insertAdjacentHTML('beforeend', `<div class="resume">上次磨到 ${Math.round(resumeSharp * 100)}%，接著磨</div>`);
+  ui.acceptBtn.textContent = resumeSharp >= 0 ? '接著磨' : '接下委託';
   customerAvatar(c, ui.orderAvatar);
   ui.orderAvatar.setAttribute('aria-label', `${c.name}的頭像`);
   setScreen('order');
@@ -2609,6 +3081,8 @@ function startOrder() {
 function acceptOrder() {
   if (game.mode === 'test' || game.mode === 'exit') return;
   if (flow.screen !== 'order' || !flow.order) startOrder();
+  if (knifeOwner === 'free') stashFreeKnife(); // the order borrows the knife; free mode gets its edge back
+  knifeOwner = 'order';
   setFlowMode('order');
   seg.flash.fill(0);
   setSharpness(SCORE.orderStart);
@@ -2623,6 +3097,12 @@ function acceptOrder() {
   for (const s of stones) s.slurry01 = 0;
   stats.dist = stats.angleDist = stats.pressDist = stats.strokes = 0;
   stats.goalDist = -1;
+  const resume = save.data.progress.order;
+  if (resume && resume.no === flow.order.no) {
+    applyEdge(resume.segs, resume.stone);
+    Object.assign(stats, resume.stats);
+    toast(`接著上次的進度：${Math.round(game.sharpness * 100)}%`, 1.4);
+  }
   // Stone wear intentionally persists between orders.
   flow.ready = game.sharpness >= flow.order.need - 1e-6;
   flow.result = null;
@@ -2634,6 +3114,7 @@ function acceptOrder() {
 /** Free sharpening (the round-3 sandbox): target chips, free-mode result card. */
 function startFree() {
   if (game.mode === 'test') return;
+  if (knifeOwner === 'order') applyFreeKnife();
   setFlowMode('free');
   setScreen('sharpen');
   leaveResult();
@@ -2735,6 +3216,7 @@ function updateAtmosphere(t) {
 
 function onResize() {
   const w = window.innerWidth, h = window.innerHeight;
+  if (!w || !h) return; // hidden / mid-rotation: a 0 size would make the aspect NaN for good
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
   renderer.setPixelRatio(pixelRatio());
@@ -2742,7 +3224,15 @@ function onResize() {
   if (drag) drag.ppu = stonePixelsPerUnit();
 }
 window.addEventListener('resize', onResize);
-window.addEventListener('orientationchange', () => setTimeout(onResize, 250));
+// Rotation: finger positions are meaningless in the new frame, and iOS reports the final
+// innerWidth/innerHeight late, so re-fit twice.
+function onRotate() {
+  releaseInput();
+  setTimeout(onResize, 250);
+  setTimeout(onResize, 700);
+}
+window.addEventListener('orientationchange', onRotate);
+screen.orientation?.addEventListener?.('change', onRotate);
 window.visualViewport?.addEventListener('resize', onResize);
 onResize();
 
@@ -2768,8 +3258,9 @@ function setSharpness(v) {
 }
 
 selectStone(0, true);
+restoreSave(); // progress, unlocks, settings, free-mode edge, stone wear (see the save block)
 refreshTargets();
-showStageTarget(0);
+showStageTarget(game.selected);
 setScreen('title'); // the page opens on the title screen; test hooks still work from here
 
 // Debug: ?demo=0.8 starts with that sharpness and cuts the hardest unlocked target immediately.
@@ -2789,7 +3280,38 @@ let frameIdx = 0, frameCount = 0, frameSum = 0;
 let simT = 0; // world time: stops during the hitstop, slows during slow motion
 window.__fps = 0;
 
+// One throwing system must not kill the loop: three.js requests the next frame only after the
+// callback returns, so an uncaught error here would freeze the game for good.
+let frames = 0;
+let frameErrors = 0;
+let autosaveT = 0;
+let grindSinceSave = false;
+const watchdog = { mode: '', t: 0 };
 function frame() {
+  frames++;
+  try {
+    if (debugFlags.throwFrame) { debugFlags.throwFrame = false; throw new Error('debug: frame'); }
+    stepFrame();
+  } catch (e) {
+    frameErrors++;
+    reportIssue('frame', e);
+    try { renderer.render(scene, camera); } catch (_) { /* context lost: the lifecycle handlers deal with it */ }
+  }
+}
+/** Stuck-state guard, in simulation seconds (a cut is ~6 s; the result exit 0.8 s). */
+function checkWatchdog(dt) {
+  if (watchdog.mode !== game.mode) {
+    watchdog.mode = game.mode;
+    watchdog.t = 0;
+    return;
+  }
+  watchdog.t += dt;
+  if ((game.mode === 'test' && watchdog.t > 30) || (game.mode === 'exit' && watchdog.t > 8)) {
+    reportIssue('watchdog', `${game.mode} for ${watchdog.t.toFixed(1)} s (phase ${cine.phase})`);
+    recoverToSharpen('watchdog');
+  }
+}
+function stepFrame() {
   const rawDt = clock.getDelta();
   const realDt = Math.min(rawDt, 0.05); // simulation step (clamped after stalls)
 
@@ -2836,19 +3358,66 @@ function frame() {
   dust.update(simT);
   updateCamera(simT, realDt);
   renderer.render(scene, camera);
+
+  checkWatchdog(realDt);
+  // Autosave the free-mode edge and stone wear every few seconds while grinding.
+  if (drag) grindSinceSave = true;
+  autosaveT += realDt;
+  if (autosaveT > 4) {
+    autosaveT = 0;
+    if (grindSinceSave) captureSave();
+    grindSinceSave = false;
+  }
 }
 renderer.setAnimationLoop(frame);
 
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden) {
-    renderer.setAnimationLoop(null);
-    audio.setGrind(0);
-    audio.ctx?.suspend();
-  } else {
-    clock.getDelta(); // drop the hidden interval
-    renderer.setAnimationLoop(frame);
-    audio.ctx?.resume().catch(() => {});
-  }
+// ---------------------------------------------------------------------------
+// Lifecycle: tab hidden / page hidden (bfcache) / frozen / WebGL context lost -> pause everything
+// (render loop, sound, vibration, held fingers) and save; resume only when all of them are clear.
+// Window blur (iOS Control Centre, notification shade) just lifts the fingers.
+// ---------------------------------------------------------------------------
+const lifecycle = { paused: false, reason: '', pauses: 0, resumes: 0, recoveries: 0, glLost: false };
+function pauseGame(reason) {
+  releaseInput();
+  try { navigator.vibrate?.(0); } catch (_) {}
+  captureSave(true);
+  if (lifecycle.paused) return;
+  lifecycle.paused = true;
+  lifecycle.reason = reason;
+  lifecycle.pauses++;
+  renderer.setAnimationLoop(null);
+  audio.ctx?.suspend().catch(() => {});
+}
+function resumeGame(reason) {
+  if (!lifecycle.paused || document.hidden || lifecycle.glLost) return;
+  lifecycle.paused = false;
+  lifecycle.reason = reason;
+  lifecycle.resumes++;
+  clock.getDelta(); // drop the paused interval
+  onResize(); // the screen may have rotated while we were away
+  renderer.setAnimationLoop(frame);
+  // Without a fresh gesture iOS may refuse; audio.unlock() retries on the next tap.
+  if (audio.ctx && audio.ctx.state !== 'running') audio.ctx.resume().catch(() => {});
+}
+document.addEventListener('visibilitychange', () => (document.hidden ? pauseGame('hidden') : resumeGame('visible')));
+window.addEventListener('pagehide', () => pauseGame('pagehide'));
+window.addEventListener('pageshow', () => resumeGame('pageshow'));
+document.addEventListener('freeze', () => pauseGame('freeze'));
+document.addEventListener('resume', () => resumeGame('resume'));
+window.addEventListener('blur', () => releaseInput());
+
+canvas.addEventListener('webglcontextlost', (e) => {
+  e.preventDefault(); // allow a restore
+  reportIssue('webgl', 'context lost');
+  pauseGame('contextlost');
+  lifecycle.glLost = true;
+  ui.glLost.classList.add('show');
+});
+canvas.addEventListener('webglcontextrestored', () => {
+  lifecycle.glLost = false;
+  ui.glLost.classList.remove('show');
+  buildEnvironment(); // three.js re-uploads geometry and textures; the PMREM target must be rebuilt
+  resumeGame('contextrestored');
 });
 
 // ---------------------------------------------------------------------------
@@ -2863,6 +3432,7 @@ window.__game = {
   get stage() { return game.stage; },
   band: [BAND_LO, BAND_HI],
 };
+let loseExt = null;
 window.__knife = {
   get phase() { return cine.phase; }, // idle | enter | windup | slash | freeze | split | recoil | result | exit
   get mode() { return game.mode; },
@@ -2917,8 +3487,31 @@ window.__knife = {
   /** -> title screen. Returns flow(). */
   title() { showTitle(); return this.flow(); },
   scoring: { SCORE, RANK_TABLE },
-  /** Render and return the share image without opening the native share sheet. */
-  async shareBlob() { return await makeScoreBlob(); },
+  /** Render and return the share image (null before the first result) without opening the share sheet. */
+  async shareBlob() {
+    const c = drawScoreCanvas();
+    return c ? await new Promise((resolve) => c.toBlob(resolve, 'image/png')) : null;
+  },
+  /** Round 7 (stability): save, flow history, recovered issues, lifecycle, share hand-off. */
+  get save() { return { status: save.status, writes: save.writes, data: JSON.parse(JSON.stringify(save.data)) }; },
+  saveNow() { captureSave(true); return save.status; },
+  resetSave() { resetProgress(); return save.status; },
+  get fsm() { return { screen: flow.screen, mode: game.mode, illegal: fsm.illegal, history: fsm.history }; },
+  get issues() { return issues.map((i) => ({ ...i })); },
+  get lifecycle() { return { ...lifecycle, frames, frameErrors, audio: audio.ctx ? audio.ctx.state : 'none', muted: audio.muted }; },
+  get share() { return { ready: shareCache.key === resultSerial && !!shareCache.file, prebuilt: shareLog.prebuilt, taps: shareLog.taps, last: shareLog.last && { ...shareLog.last } }; },
+  debug: {
+    throwInFrame() { debugFlags.throwFrame = true; },
+    breakNextTween() { debugFlags.breakTween = true; },
+    loseContext() {
+      loseExt = renderer.getContext().getExtension('WEBGL_lose_context');
+      loseExt?.loseContext();
+      return !!loseExt;
+    },
+    restoreContext() { loseExt?.restoreContext(); return !!loseExt; },
+    /** Forget the pre-built share image, so the next tap takes the synchronous toDataURL path. */
+    dropShareCache() { shareCache = { key: -1, blob: null, file: null }; },
+  },
   /** Snapshot for headless tests. */
   state() {
     return {
@@ -2929,8 +3522,11 @@ window.__knife = {
       screen: flow.screen, flowMode: flow.mode,
     };
   },
-  /** Debug only. */
-  setSharpness,
+  /** Debug only. Outside order mode the edge set here becomes the free-mode edge. */
+  setSharpness(v) {
+    if (flow.mode !== 'order') knifeOwner = 'free';
+    return setSharpness(v);
+  },
   setAngle(a) { setAngle(Number(a)); return game.angle; },
   setStone(id) { selectStone(stoneIndex(id)); return STONES[game.stone].id; },
   back(reset = false) { return backToSharpen(reset); },

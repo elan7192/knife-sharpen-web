@@ -49,6 +49,7 @@ python3 -m http.server 8000
 
 - 像素比上限：桌面 `min(devicePixelRatio, 2)`、手機 1.5；陰影圖手機 1024（PCFShadowMap）、桌面 2048（PCFSoftShadowMap）；只有太陽投影，行灯點光源不投影。
 - 場景以合併幾何（`mergeGeometries`）與 instancing 減少繪製呼叫；粒子為固定池（手機每組 ≤ 120），主迴圈不配置新物件；HUD 只在數值改變時寫 DOM；分頁隱藏時暫停繪製與音訊。
+- 自動測試：`node tests/stability.iphone13.mjs`（Playwright 無頭 iPhone 13；three.js 首次以 curl 快取到 `tests/.cache/`；截圖與分享圖輸出到 `tests/artifacts/`）。
 - 測試掛鉤：`window.__game`（getter：`sharpness`、`angle`、`pressure`、`phase`＝`sharpen`/`test`/`result`，另有 `segments`、`stage`、`band`）與 `window.__fps`（最近 60 幀實際幀率平均）。
 
 ## 模型與素材授權
@@ -91,3 +92,4 @@ python3 -m http.server 8000
 - 2026-10-26 | who: Executor via Grok Bot | reviewer: OpenAI Codex CLI (gpt-6-luna)（對照 main.js 查核數值） | what: 新增 UNITY_PORT.md（網頁機制 → Unity C# 對照＋單一參數表＋評分表） | why: 之後移植到 KnifeProto
 - 2026-10-26 | who: Executor via OpenAI Codex CLI (gpt-5.6-terra)（Claude 額度用完至 12:20，代為主寫） | reviewer: OpenAI Codex CLI (gpt-6-luna)（初審＋修正後重審，無新回歸） | what: 第 5 輪：低多邊形日式工房打磨（行灯暖光微閃、白天／黃昏光線分調、暖簾擺動、障子格窗、地板細節、竹林搖曳、光中浮塵 手機 12 點／桌面 48 點）；委託多樣化（更多客人與刀種文案：牛刀、三德刀、出刃、柳刃、菜切、中式菜刀，程式繪製客人頭像，高 DPR 清晰）；WebAudio 音效精修（依砥石變化的磨刀聲、按鈕聲、客人來店鈴、S/A/B/C 結果音、低音量環境聲） | why: 待辦 (5) 場景打磨與 (8) 委託／音效；無頭流程測試 2 件委託＋自由試刀冰山皆通過、無主控台錯誤、無捲動
 - 2026-10-26 | who: Executor via OpenAI Codex CLI (gpt-5.6-terra)（Claude 額度用完至 12:20，代為主寫） | reviewer: OpenAI Codex CLI (gpt-6-luna) | what: 第 6 輪：結果卡「分享成績」（先渲染再擷取畫面＋疊加分數／評價／目標文字成 PNG，支援 navigator.share 分享檔案，否則下載；測試掛鉤 window.__knife.shareBlob()）；震動回饋（navigator.vibrate，不支援時如 iOS 靜默略過；磨刀時依壓力 8–25ms 短震、每 120ms 最多一次，刃鳴 30ms，試刀頓幀 [60,40,120]，彈刀 [40]；標題畫面「震動：開／關」並記在 localStorage）；中／細砥石研ぎ汁（泥漿）讓石面逐漸變深，換石與新委託時重置 | why: 研究延後清單的截圖分享、震動回饋、研ぎ汁視覺；審查 1 項 major（iOS 分享前等待 PNG 編碼可能失去使用者手勢、分享失敗時沒有改下載）已採納但未修：修正時 Codex 額度用完，列為下一輪第一件
+- 2026-10-26 | who: claude-cloud-stability via Claude Code cloud (Claude Opus 5.5) | reviewer: 待指派（不同模型） | what: 第 7 輪穩定性：新增 stability.js（畫面轉移表、版本化 localStorage 存檔、分享交接）；main.js 局部接線：所有畫面切換經 goScreen() 檢查、frame／tween／試刀例外自動復原＋看門狗、WebGL context lost 暫停與還原；存檔進度／解鎖／設定（震動、新增音效開關）、自由模式刃口與砥石磨耗、未完成委託可接著磨，壞檔自動備份、無儲存空間仍可玩、兩段式清除紀錄；分頁隱藏／pagehide／freeze 暫停繪製、音效、震動並存檔，blur 放開手指，旋轉時重新取景；修 iOS 分享：結果卡出現時先建好 PNG，點擊內第一個非同步動作就是 navigator.share，tap 太快則同步 toDataURL 轉 Blob，非 AbortError 改顯示預覽＋下載；分享圖重新設計（1080×1350，寬銀幕畫面＋印章評價＋分項條）；橫向結果卡雙欄；tests/ Playwright 無頭 iPhone 13 流程測試 54 項 | why: 穩定性線任務與第 6 輪審查遺留的 iOS 分享 major

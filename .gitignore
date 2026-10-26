@@ -3,3 +3,5 @@ models/
 node_modules/
 .vercel/
 screenshot.png
+tests/.cache/
+tests/artifacts/
