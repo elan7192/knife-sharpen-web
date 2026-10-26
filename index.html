@@ -288,7 +288,11 @@
     #narr::before, #narr::after { content: ''; display: block; width: 36px; height: 1px; margin: 6px auto; background: rgba(247,247,242,0.55); }
     #narr.show { opacity: 1; transform: translate(-50%, 0); }
     body.cine #narr { bottom: calc(env(safe-area-inset-bottom) + 24px); }
-    @media (max-height: 520px) { #narr { bottom: calc(env(safe-area-inset-bottom) + 76px); font-size: 15px; } }
+    @media (max-height: 520px) {
+      #narr { bottom: auto; top: calc(env(safe-area-inset-top) + 14px); left: auto; right: calc(env(safe-area-inset-right) + 84px); width: min(36vw, 320px); transform: translateY(-6px); font-size: 15px; }
+      #narr.show { transform: none; }
+      body.cine #narr { top: auto; bottom: calc(env(safe-area-inset-bottom) + 12px); }
+    }
 
     #lab .card { background: rgba(11, 13, 18, 0.9); width: min(94vw, 460px); padding: 16px 14px 14px; max-height: 100%; overflow: auto; }
     #lab h2 { margin: 0 0 2px; font-size: 24px; letter-spacing: 0.25em; color: var(--climax-ink); text-align: center; }

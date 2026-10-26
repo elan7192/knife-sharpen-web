@@ -45,7 +45,7 @@ export const MATERIALS = [
   },
   {
     id: 'jelly', name: '果凍刀', short: '果凍', kind: 'jelly', max: 0.45, rate: 0.7, start: 0, goal: 'rope',
-    chips: ['#B23A7A', '#E07AB0', '#7A2A5A'], grit: 0, wobble: 1, r0: 0.18, r1: 0.06,
+    chips: ['#7E3A8E', '#B57BC9', '#4E1F5E'], grit: 0, wobble: 1, r0: 0.18, r1: 0.06,
     intro: '葡萄口味。它在砥石上一直發抖，但它沒有放棄。',
     mid: '抖歸抖，刃口是真的。',
     done: '果凍切開了繩子。物理老師請不要看這一段。',
@@ -151,9 +151,9 @@ const PAINT = {
   },
   jelly(g, w, h) {
     const grad = g.createLinearGradient(0, 0, 0, h);
-    grad.addColorStop(0, '#E07AB0');
-    grad.addColorStop(0.5, '#B23A7A');
-    grad.addColorStop(1, '#7A2A5A');
+    grad.addColorStop(0, '#B57BC9');
+    grad.addColorStop(0.5, '#7E3A8E');
+    grad.addColorStop(1, '#4E1F5E');
     g.fillStyle = grad;
     g.fillRect(0, 0, w, h);
     const r = rng(3);
@@ -217,7 +217,7 @@ export function makeBladeMaterial(def) {
   const common = { map, roughness: def.r0, metalness: 0, side: THREE.DoubleSide };
   switch (def.kind) {
     case 'jelly':
-      return new THREE.MeshPhysicalMaterial({ ...common, transparent: true, opacity: 0.8, clearcoat: 1, clearcoatRoughness: 0.08, emissive: '#3A0A24', emissiveIntensity: 0.6 });
+      return new THREE.MeshPhysicalMaterial({ ...common, transparent: true, opacity: 0.8, clearcoat: 1, clearcoatRoughness: 0.08, emissive: '#2A0A3A', emissiveIntensity: 0.6 });
     case 'ice':
       return new THREE.MeshPhysicalMaterial({ ...common, transparent: true, opacity: 0.78, clearcoat: 1, clearcoatRoughness: 0.02, emissive: '#1C2A3A', emissiveIntensity: 0.5, envMapIntensity: 1.6 });
     case 'chocolate':
