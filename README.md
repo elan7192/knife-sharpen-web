@@ -76,9 +76,9 @@ python3 -m http.server 8000
 - 砥石粒度 粗→中→細（多層髒汙式的換石、換音色、換手感）
 - 客人／委託（不同刀種與小故事）、工房升級與解鎖
 - 試刀目標換成 番茄、巻藁（榻榻米捲）等階梯；切口平整度評分
-- 試刀回放與截圖／GIF 分享
-- 手把震動（rumble，強度與壓力連動）
-- 研ぎ汁（泥漿）視覺、名人模式計分
+- 試刀回放與 GIF 分享（截圖分享已於第 6 輪完成）
+- ~~手機震動（強度與壓力連動）~~（第 6 輪完成，手把 rumble 留待 Unity）
+- ~~研ぎ汁（泥漿）視覺~~（第 6 輪完成）、名人模式計分
 - 10 分鐘 Demo 切片與試玩實驗（灰盒手感、DING A/B、頓幀 0/80/150 ms 調參）
 
 ## 變更紀錄
@@ -90,3 +90,4 @@ python3 -m http.server 8000
 - 2026-10-26 | who: Executor via Claude Code (Opus 5.5)（審查修正由 OpenAI Codex CLI (gpt-5.6-terra) 代修，因 Claude 額度用完至 12:20） | reviewer: OpenAI Codex CLI (gpt-6-luna)（初審＋修正後重審） | what: 第 4 輪遊戲流程：標題畫面（開始／自由磨刀）→ 委託卡（客人、牛刀、指定試刀目標，難度隨完成件數上升）→ 磨刀（HUD 顯示委託）→ 試刀 → 結果（0–100 分、S/A/B/C、分項：鋒利度餘裕 40／角度 25／壓力 20／效率 15；失敗可「再磨一下」）→ 下一個委託／回標題；window.__knife.flow/startOrder/acceptOrder/startFree/title；審查修正：過場中不可切換畫面或重疊試刀、退場動畫中不可接委託、每件委託重設壓力／速度、完成件數只計一次、沒磨刀時角度／壓力／效率 0 分 | why: 待辦 (4) 遊戲流程；依獨立審查修正狀態機漏洞
 - 2026-10-26 | who: Executor via Grok Bot | reviewer: OpenAI Codex CLI (gpt-6-luna)（對照 main.js 查核數值） | what: 新增 UNITY_PORT.md（網頁機制 → Unity C# 對照＋單一參數表＋評分表） | why: 之後移植到 KnifeProto
 - 2026-10-26 | who: Executor via OpenAI Codex CLI (gpt-5.6-terra)（Claude 額度用完至 12:20，代為主寫） | reviewer: OpenAI Codex CLI (gpt-6-luna)（初審＋修正後重審，無新回歸） | what: 第 5 輪：低多邊形日式工房打磨（行灯暖光微閃、白天／黃昏光線分調、暖簾擺動、障子格窗、地板細節、竹林搖曳、光中浮塵 手機 12 點／桌面 48 點）；委託多樣化（更多客人與刀種文案：牛刀、三德刀、出刃、柳刃、菜切、中式菜刀，程式繪製客人頭像，高 DPR 清晰）；WebAudio 音效精修（依砥石變化的磨刀聲、按鈕聲、客人來店鈴、S/A/B/C 結果音、低音量環境聲） | why: 待辦 (5) 場景打磨與 (8) 委託／音效；無頭流程測試 2 件委託＋自由試刀冰山皆通過、無主控台錯誤、無捲動
+- 2026-10-26 | who: Executor via OpenAI Codex CLI (gpt-5.6-terra)（Claude 額度用完至 12:20，代為主寫） | reviewer: OpenAI Codex CLI (gpt-6-luna) | what: 第 6 輪：結果卡「分享成績」（先渲染再擷取畫面＋疊加分數／評價／目標文字成 PNG，支援 navigator.share 分享檔案，否則下載；測試掛鉤 window.__knife.shareBlob()）；震動回饋（navigator.vibrate，不支援時如 iOS 靜默略過；磨刀時依壓力 8–25ms 短震、每 120ms 最多一次，刃鳴 30ms，試刀頓幀 [60,40,120]，彈刀 [40]；標題畫面「震動：開／關」並記在 localStorage）；中／細砥石研ぎ汁（泥漿）讓石面逐漸變深，換石與新委託時重置 | why: 研究延後清單的截圖分享、震動回饋、研ぎ汁視覺；審查 1 項 major（iOS 分享前等待 PNG 編碼可能失去使用者手勢、分享失敗時沒有改下載）已採納但未修：修正時 Codex 額度用完，列為下一輪第一件

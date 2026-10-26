@@ -93,6 +93,9 @@ const LETTERBOX_IN = 0.6; // seconds for the bars to slide in / out
 const CINE_HFOV = 44; // horizontal field of view (deg) of the 2.39:1 cinematic frame
 const CUT_TILT = THREE.MathUtils.degToRad(30); // pre-cut plane: 30° off vertical (05-model-specs)
 const SHAKE_TIME = 0.45; // camera shake decay after the freeze (s)
+const HAPTIC_DING = 30;
+const HAPTIC_CUT = [60, 40, 120];
+const HAPTIC_BOUNCE = [40];
 
 // Whetstones 粗 / 中 / 細: rate = progress multiplier, cap = highest sharpness that stone can reach,
 // wear = how fast its top dishes, fx = particles at the contact point, sound = grind timbre.
@@ -409,9 +412,10 @@ const stones = STONES.map((def) => {
   return {
     def, mesh: m, material, dry, wet: dry.clone().lerp(P.water, 0.35).multiplyScalar(0.85),
     wear: new Float32Array(WEAR_COLS + 1), top: Int32Array.from(top), topCol: Int32Array.from(topCol),
-    topProf: Float32Array.from(topProf), dirty: false, slot: 0, wet01: 0,
+    topProf: Float32Array.from(topProf), dirty: false, slot: 0, wet01: 0, slurry01: 0,
   };
 });
+const stoneSlurryColor = new THREE.Color();
 const stoneIndex = (id) => STONES.findIndex((s) => s.id === id);
 function placeStones(activeIdx, k = 1, from = null) {
   let rest = 1;
@@ -1206,7 +1210,26 @@ const ui = {
   orderKnife: $('orderKnife'), orderTarget: $('orderTarget'),
   orderAvatar: $('orderAvatar'), resultAvatar: $('resultAvatar'), resultCustomer: $('resultCustomer'), resultHead: $('resultHead'),
   resultScore: $('resultScore'), retryBtn: $('retryBtn'), nextOrderBtn: $('nextOrderBtn'), titleBtn: $('titleBtn'),
+  shareBtn: $('shareBtn'), hapticBtn: $('hapticBtn'),
 };
+let hapticsEnabled = true;
+try {
+  const savedHaptics = localStorage.getItem('knife.haptics');
+  if (savedHaptics === '0') hapticsEnabled = false;
+} catch (_) {}
+function updateHapticButton() {
+  ui.hapticBtn.textContent = `震動：${hapticsEnabled ? '開' : '關'}`;
+}
+function setHaptics(enabled) {
+  hapticsEnabled = !!enabled;
+  try { localStorage.setItem('knife.haptics', hapticsEnabled ? '1' : '0'); } catch (_) {}
+  updateHapticButton();
+}
+function haptic(pattern) {
+  if (!hapticsEnabled || typeof navigator.vibrate !== 'function') return;
+  try { navigator.vibrate(pattern); } catch (_) {}
+}
+updateHapticButton();
 for (const t of TARGETS) {
   if (t.need <= 0) continue;
   const tick = document.createElement('i');
@@ -1462,6 +1485,10 @@ onButton(ui.menuBtn, () => showTitle());
 onButton(ui.retryBtn, () => backToSharpen(false));
 onButton(ui.nextOrderBtn, () => startOrder());
 onButton(ui.titleBtn, () => showTitle());
+onButton(ui.hapticBtn, () => {
+  setHaptics(!hapticsEnabled);
+});
+onButton(ui.shareBtn, () => { shareScore().catch(() => {}); });
 stoneBtns.forEach((b, i) => b.addEventListener('click', () => { audio.unlock(); if (flow.screen === 'sharpen') selectStone(i); }));
 targetBtns.forEach((b, i) => b.addEventListener('click', () => {
   audio.unlock();
@@ -1482,10 +1509,12 @@ const contact = new THREE.Vector3();
 let lastAngleDeg = Math.round(START_ANGLE);
 let stoneSwitching = false;
 let stoneSwap = null; // resolves when the current stone swap tween ends
+let lastGrindHaptic = -Infinity;
 
 function onSegmentLevel(i, level) {
   seg.flash[i] = 1;
   audio.ding(level, i);
+  haptic(HAPTIC_DING);
   // glints at that part of the edge
   const x = edgeXAt(segCenter(i));
   sharpKnife.localToWorld(tmpP.set(x, edgeY(x) + 0.002, 0));
@@ -1502,6 +1531,7 @@ function onSegmentLevel(i, level) {
 function selectStone(i, instant = false) {
   if (i < 0 || i >= STONES.length) return;
   if (!instant && (i === game.stone || stoneSwitching || game.mode !== 'sharpen')) return;
+  for (const s of stones) s.slurry01 = 0;
   const from = stones.map((s) => s.slot);
   game.stone = i;
   const def = STONES[i];
@@ -1611,11 +1641,18 @@ function updateSharpening(dt, t) {
     // Hands are never perfectly steady: a little drift the player must correct.
     setAngle(game.angle + (Math.sin(t * 1.3) + Math.sin(t * 2.9 + 1)) * 0.9 * dt);
     stone.wet01 = Math.min(1, stone.wet01 + dt * 0.5);
+    if (st.fx === 'slurry') stone.slurry01 = Math.min(1, stone.slurry01 + dt * (0.08 + game.pressure * 0.16));
+    const now = performance.now();
+    if (now - lastGrindHaptic >= 120) {
+      lastGrindHaptic = now;
+      haptic(Math.round(8 + game.pressure * 17));
+    }
   }
   for (const s of stones) {
     if (s !== stone || !grinding) s.wet01 = Math.max(0, s.wet01 - dt * 0.04);
     s.material.roughness = lerp(0.85, 0.3, s.wet01);
     s.material.color.lerpColors(s.dry, s.wet, s.wet01);
+    if (s.slurry01 > 0) s.material.color.copy(stoneSlurryColor.copy(s.material.color).multiplyScalar(lerp(1, 0.84, s.slurry01)));
   }
 
   // Edge coverage: the part of the edge on the stone follows the stroke position.
@@ -2147,6 +2184,7 @@ async function slashSuccess(target, sHigh) {
       target.whole.visible = false;
       for (const h of target.halves) h.mesh.visible = true;
       startHitstop(target.def.hitstop, 0.005 + target.weight * 0.0025, 'slash');
+      haptic(HAPTIC_CUT);
       audio.slice();
       if (target.weight >= 2) audio.boom(target.weight);
       flash(CLIMAX.slash, 0.75, 260);
@@ -2167,6 +2205,7 @@ async function slashSuccess(target, sHigh) {
 async function slashFail(target, sHigh) {
   await tween(SLASH_TIME * 0.6, (k) => (chopRig.position.y = lerp(sHigh, target.sTop, k)), (t) => t * t);
   startHitstop(FAIL_HITSTOP, 0.009, 'recoil');
+  haptic(HAPTIC_BOUNCE);
   audio.clink();
   impactFX(target, slashPoint(target.sTop, tmpP), false);
   toast('刀被彈開了…再磨利一點', 1.8);
@@ -2346,6 +2385,67 @@ function setResultButtons(isOrder, success) {
   }
 }
 
+/** Capture the current scene and add the result text without keeping a drawing buffer alive. */
+async function makeScoreBlob() {
+  try {
+    renderer.render(scene, camera);
+    const source = renderer.domElement;
+    const capture = document.createElement('canvas');
+    capture.width = source.width;
+    capture.height = source.height;
+    if (!capture.width || !capture.height) return null;
+    const ctx = capture.getContext('2d');
+    if (!ctx) return null;
+    ctx.drawImage(source, 0, 0);
+    const scale = Math.max(1, capture.width / Math.max(1, window.innerWidth));
+    const title = ui.resultTitle.textContent.trim() || '磨刀成績';
+    const score = ui.resultScore.classList.contains('hidden') ? '' : ui.resultScore.textContent.trim();
+    const resultTarget = TARGETS.find((item) => item.id === cine.lastResult?.id);
+    const target = resultTarget?.name || TARGETS[cutIdx()]?.name || '';
+    const detail = ui.resultBody.textContent.trim().replace(/\s+/g, ' ').slice(0, 78);
+    const bandH = Math.min(capture.height * 0.42, 150 * scale);
+    ctx.fillStyle = 'rgba(8, 10, 14, 0.78)';
+    ctx.fillRect(0, capture.height - bandH, capture.width, bandH);
+    ctx.fillStyle = '#F5EFE6';
+    ctx.textBaseline = 'top';
+    ctx.font = `600 ${14 * scale}px sans-serif`;
+    ctx.fillText('研刃 · 磨刀', 20 * scale, capture.height - bandH + 16 * scale);
+    ctx.font = `700 ${28 * scale}px sans-serif`;
+    ctx.fillText(title, 20 * scale, capture.height - bandH + 38 * scale);
+    ctx.font = `500 ${16 * scale}px sans-serif`;
+    ctx.fillStyle = '#D7DDE5';
+    ctx.fillText(`${score ? `${score}・` : ''}目標：${target}`, 20 * scale, capture.height - bandH + 76 * scale);
+    if (detail) {
+      ctx.font = `400 ${12 * scale}px sans-serif`;
+      ctx.fillText(detail, 20 * scale, capture.height - bandH + 102 * scale, capture.width - 40 * scale);
+    }
+    return await new Promise((resolve) => capture.toBlob(resolve, 'image/png'));
+  } catch (_) {
+    return null;
+  }
+}
+
+async function shareScore() {
+  const blob = await makeScoreBlob();
+  if (!blob) return null;
+  try {
+    const file = new File([blob], 'knife-score.png', { type: 'image/png' });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try { await navigator.share({ files: [file], title: '磨刀成績' }); } catch (_) {}
+      return blob;
+    }
+  } catch (_) {}
+  try {
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.href = url;
+    link.download = 'knife-score.png';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (_) {}
+  return blob;
+}
+
 /** Ideal full passes (perfect angle and pressure, best stone each pass) to raise the edge from -> to. */
 function idealPasses(from, to) {
   let p = from, n = 0;
@@ -2520,6 +2620,7 @@ function acceptOrder() {
   game.speed = 0;
   game.burr = 0;
   game.hold = 0;
+  for (const s of stones) s.slurry01 = 0;
   stats.dist = stats.angleDist = stats.pressDist = stats.strokes = 0;
   stats.goalDist = -1;
   // Stone wear intentionally persists between orders.
@@ -2779,6 +2880,8 @@ window.__knife = {
   get shake() { return shake; },
   get lastResult() { return cine.lastResult; },
   get sharpness() { return game.sharpness; },
+  get haptics() { return hapticsEnabled; },
+  set haptics(enabled) { setHaptics(enabled); },
   get stone() { return STONES[game.stone].id; },
   get wear() { return Object.fromEntries(stones.map((s) => [s.def.id, Math.max(...s.wear)])); },
   get halvesVisible() { return stageTarget.halves.every((h) => h.mesh.visible) && !stageTarget.whole.visible; },
@@ -2814,6 +2917,8 @@ window.__knife = {
   /** -> title screen. Returns flow(). */
   title() { showTitle(); return this.flow(); },
   scoring: { SCORE, RANK_TABLE },
+  /** Render and return the share image without opening the native share sheet. */
+  async shareBlob() { return await makeScoreBlob(); },
   /** Snapshot for headless tests. */
   state() {
     return {

@@ -1,6 +1,6 @@
 # STATE — 磨刀網頁原型
 
-- 更新時間：2026-10-26 09:40（台北時間）
+- 更新時間：2026-10-26 11:45（台北時間）
 - 公開網址：https://elan7192.github.io/knife-sharpen-web/ （GitHub Pages，見下方部署更新）
 - 舊註記（已改走 Pages）：  - 阻礙：Vercel 連線（MCP）對帳號團隊 `test11-7356`（team_GEtLKZM01yVJPfWCIOeeGgdq）回 403，需使用者在瀏覽器核准團隊存取（authorize_team_access 產生的一次性連結，10 分鐘內有效）。核准後以 create_deployment 重送即可（專案名 `knife-sharpen-web`、target production、只上傳 index.html 與 main.js、framework null）。Hobby 方案免費。
 - 本機試玩：`cd /workspace/knife-web && python3 -m http.server 8765` → http://localhost:8765/
@@ -42,3 +42,11 @@
 ## 第 5 輪（2026-10-26 11:05 台北）已完成
 - 場景打磨＋委託多樣化＋音效精修（見 README 變更紀錄）。主寫 Codex gpt-5.6-terra，審查 gpt-6-luna 初審＋重審。
 - 驗證：r5/flow2.json PASS（2 件委託 S、自由模式冰山成功、頓幀 120ms、無錯誤、無捲動）；legacy.json 黑邊 2.39、無外部模型請求。
+
+## 第 6 輪（2026-10-26 11:45 台北）已完成
+- 結果卡「分享成績」（PNG：畫面＋分數／評價／目標；navigator.share 分享檔案，否則下載；`window.__knife.shareBlob()`）。
+- 震動回饋（navigator.vibrate，iOS 不支援時靜默略過）：磨刀依壓力短震（每 120ms 最多一次）、刃鳴、試刀頓幀、彈刀；標題畫面「震動：開／關」（localStorage `knife.haptics`）。
+- 研ぎ汁：中／細砥石磨久石面逐漸變深，換石／新委託重置。
+- 寫碼：Codex gpt-5.6-terra；審查：Codex gpt-6-luna（無 blocker，1 項 major）。
+- 驗證：r6/flow2.json PASS（2 件委託 S、自由模式冰山成功、分享鈕 48px 在畫面內、shareBlob 回傳 image/png（PNG 檔頭）、真實點擊分享鈕無錯誤、vibrate 呼叫 577 次無例外、無主控台錯誤、無捲動）。flow1 的自由試刀失敗是測試腳本等待不足（軟體繪圖約 3 fps），改為等到 sharpen 再試刀後通過。
+- **未修（下一輪第一件）**：審查 major — iOS Safari 上 shareScore() 先 await PNG 編碼才呼叫 navigator.share，可能失去使用者手勢而被拒；且非 AbortError 失敗時不會改為下載。建議：同步 toDataURL→Blob 後立即 share，非 AbortError 時改下載。修正時 Codex 額度用完（Claude 12:20 恢復）。
