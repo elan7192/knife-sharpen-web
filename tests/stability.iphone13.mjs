@@ -165,9 +165,9 @@ const t0 = Date.now();
   await T.step('progress survives a reload', async () => {
     await page.reload({ waitUntil: 'load' });
     await waitFor(page, () => window.__knife && __knife.lifecycle.frames > 2);
-    const s = await page.evaluate(() => ({ flow: __knife.flow(), rec: __knife.save.data.records, start: document.getElementById('startBtn').textContent, record: document.getElementById('titleRecord').textContent }));
+    const s = await page.evaluate(() => ({ flow: __knife.flow(), rec: __knife.save.data.records, start: document.getElementById('startBtn').textContent, record: document.getElementById('titleRecord').textContent, firstTarget: __knife.targets[0].id })); // integrate-r8: first order target follows the ladder (now 番茄)
     T.ok(s.flow.completed === 1, 'completed orders restored', s.flow.completed);
-    T.ok(s.rec.bestScore != null && s.rec.cuts.paper >= 1, 'records restored', s.rec);
+    T.ok(s.rec.bestScore != null && s.rec.cuts[s.firstTarget] >= 1, 'records restored', s.rec);
     T.ok(s.start === '繼續・第 2 件' && s.record.includes('已完成 1 件委託'), 'title shows the progress', s);
     await shot(page, 'a5-title-with-record');
   });
@@ -182,9 +182,10 @@ const t0 = Date.now();
     await page.reload({ waitUntil: 'load' });
     await waitFor(page, () => window.__knife && __knife.lifecycle.frames > 2);
     await tap(page, 'freeBtn');
-    const s = await page.evaluate(() => ({ sharp: __knife.sharpness, unlocked: __knife.unlocked }));
+    // integrate-r8: the gameplay line re-tuned the ladder, so expect whatever target the table unlocks at 60%
+    const s = await page.evaluate(() => ({ sharp: __knife.sharpness, unlocked: __knife.unlocked, expect: __knife.targets.filter((t) => t.need <= 0.6).pop().id }));
     T.ok(inOrder < 0.1, 'an order starts from a dull edge', inOrder);
-    T.ok(Math.abs(s.sharp - 0.6) < 0.01 && s.unlocked.includes('iron'), 'free-mode edge + unlocks back after reload', s);
+    T.ok(Math.abs(s.sharp - 0.6) < 0.01 && s.unlocked.includes(s.expect), 'free-mode edge + unlocks back after reload', s);
   });
 
   await T.step('errors: a throwing frame and a broken cut both recover', async () => {
