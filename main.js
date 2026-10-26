@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { MATERIALS, makeBladeMaterial, makeRustTextures, drawMaterialIcon } from './materials.js';
+import { buildTester, drawChart, dialAngle, THREAD_Y } from './tester.js';
 
 // ---------------------------------------------------------------------------
 // URL options
@@ -44,14 +46,18 @@ const SEG_WINDOW = 1.5 / SEGS; // contact patch half-width in edge units
 // Test-cut targets, in unlock order. need = sharpness that unlocks it (and that a cut requires);
 // hitstop = cut freeze (s, capped by HITSTOP_MAX); dull = edge lost per successful cut, so a
 // target unlocked earlier can bounce the blade later until it is touched up again.
+// tilt = cut plane angle off vertical (90° = a level slice); slowHold = extra real seconds of slow motion.
+// Ladder (2026-10-26 design): 番茄皮 → 紙 → 繩 → 寶特瓶 (first big climax) → 鐵 → 巨石 → 冰山.
 const TARGETS = [
-  { id: 'paper', name: '紙', need: 0.0, hitstop: 0.04, dull: 0.0 },
-  { id: 'makiwara', name: '卷藁', need: 0.3, hitstop: 0.06, dull: 0.01 },
-  { id: 'iron', name: '鐵', need: 0.55, hitstop: 0.09, dull: 0.03 },
-  { id: 'boulder', name: '巨石', need: 0.75, hitstop: 0.11, dull: 0.04 },
-  { id: 'iceberg', name: '冰山', need: 0.92, hitstop: 0.12, dull: 0.03 },
+  { id: 'tomato', name: '番茄', need: 0.15, hitstop: 0.04, dull: 0.0, tilt: 30 },
+  { id: 'paper', name: '紙', need: 0.28, hitstop: 0.04, dull: 0.0, tilt: 30 },
+  { id: 'rope', name: '繩', need: 0.42, hitstop: 0.06, dull: 0.01, tilt: 30 },
+  { id: 'bottle', name: '寶特瓶', need: 0.55, hitstop: 0.08, dull: 0.01, tilt: 82, slowHold: 0.9, frame: 0.07 },
+  { id: 'iron', name: '鐵', need: 0.72, hitstop: 0.09, dull: 0.03, tilt: 30 },
+  { id: 'boulder', name: '巨石', need: 0.86, hitstop: 0.11, dull: 0.03, tilt: 30 },
+  { id: 'iceberg', name: '冰山', need: 0.95, hitstop: 0.12, dull: 0.02, tilt: 30 },
 ];
-const RANKS = ['鈍刀', '入門', '見習', '利刃', '名刀', '神品']; // index = best target cut + 1 (free mode)
+const RANKS = ['鈍刀', '入門', '見習', '堪用', '利刃', '快刀', '名刀', '神品']; // index = best target cut + 1 (free mode)
 
 // Order (委託) mode. Order n asks for TARGETS[min(n, last)] (difficulty rises per completed order,
 // then stays at the iceberg); the customer cycles through this list. The knife is always the gyuto.
@@ -97,17 +103,40 @@ const HAPTIC_DING = 30;
 const HAPTIC_CUT = [60, 40, 120];
 const HAPTIC_BOUNCE = [40];
 
-// Whetstones 粗 / 中 / 細: rate = progress multiplier, cap = highest sharpness that stone can reach,
-// wear = how fast its top dishes, fx = particles at the contact point, sound = grind timbre.
-// Colours are palette entries (05/palettes.json): dusk stone, dusk wood, day gravel.
+// Whetstones: six grits #120 → #8000 plus the endgame #30000 mirror stone (2026-10-26 design).
+// rate = progress multiplier, cap = highest sharpness that stone can reach, wear = how fast its top
+// dishes, rust = how fast it scrubs rust off, fx = particles at the contact point, sound = grind timbre.
+// ids coarse / medium / fine keep the round-3 test hooks working (#220 / #1000 / #6000).
+// Colours are palette entries (05/palettes.json) or blends of them.
 const STONES = [
-  { id: 'coarse', name: '粗', grit: '#220', color: '#5C5650', rate: 2.2, cap: 0.55, wear: 1.0, fx: 'spark',
+  { id: 'rough', name: '荒', grit: '#120', color: '#4F534C', rate: 3.6, cap: 0.22, wear: 1.3, rust: 1.0, fx: 'spark',
+    sound: { f0: 190, f1: 760, q: 0.6, gain: 1.05, grit: 0.95, hiss: 0.03, hissF: 2000 } },
+  { id: 'coarse', name: '粗', grit: '#220', color: '#5C5650', rate: 2.8, cap: 0.36, wear: 1.0, rust: 0.7, fx: 'spark',
     sound: { f0: 240, f1: 950, q: 0.7, gain: 1.0, grit: 0.7, hiss: 0.04, hissF: 2400 } },
-  { id: 'medium', name: '中', grit: '#1000', color: '#A8643C', rate: 1.0, cap: 0.85, wear: 0.45, fx: 'slurry',
+  { id: 'medium', name: '中', grit: '#1000', color: '#A8643C', rate: 2.0, cap: 0.55, wear: 0.5, rust: 0.3, fx: 'slurry',
     sound: { f0: 480, f1: 1700, q: 1.1, gain: 0.75, grit: 0.15, hiss: 0.12, hissF: 3600 } },
-  { id: 'fine', name: '細', grit: '#6000', color: '#DCD3C3', rate: 0.5, cap: 1.0, wear: 0.2, fx: 'slurry',
+  { id: 'medium2', name: '中', grit: '#2000', color: '#C08A5A', rate: 1.6, cap: 0.68, wear: 0.4, rust: 0.2, fx: 'slurry',
+    sound: { f0: 700, f1: 2300, q: 1.5, gain: 0.65, grit: 0.08, hiss: 0.18, hissF: 4600 } },
+  { id: 'fine', name: '細', grit: '#6000', color: '#DCD3C3', rate: 1.35, cap: 0.82, wear: 0.25, rust: 0.1, fx: 'slurry',
     sound: { f0: 1100, f1: 3400, q: 2.2, gain: 0.5, grit: 0, hiss: 0.28, hissF: 6400 } },
+  { id: 'fine2', name: '細', grit: '#8000', color: '#ECE5D6', rate: 1.15, cap: 0.9, wear: 0.2, rust: 0.08, fx: 'slurry',
+    sound: { f0: 1400, f1: 3900, q: 2.6, gain: 0.42, grit: 0, hiss: 0.32, hissF: 7200 } },
+  { id: 'mirror', name: '鏡', grit: '#30000', color: '#E9D9B0', rate: 0.9, cap: 1.0, wear: 0.12, rust: 0.05, fx: 'slurry', mirror: true,
+    sound: { f0: 1800, f1: 4600, q: 3.2, gain: 0.32, grit: 0, hiss: 0.36, hissF: 8400 } },
 ];
+// Sharpness tester (鋒利度測試儀): cutting force in grams, lower = sharper. Log-linear in sharpness:
+// s = 0 → FORCE.dull, s = 1 → FORCE.sharp; rust adds drag. At or above FORCE.noCut the thread doesn't part.
+const FORCE = { dull: 2000, sharp: 25, noCut: 1500, rustDrag: 1.2 };
+// Grades by force (g): first row whose min the force reaches. Colours from the palette / climax set.
+const GRADES = [
+  { id: 'dull', name: '鈍', min: 600, color: '#B04A33' },
+  { id: 'usable', name: '可用', min: 300, color: '#E09A2A' },
+  { id: 'sharp', name: '利', min: 150, color: '#5FD17A' },
+  { id: 'razor', name: '剃刀', min: 45, color: '#9FB7C9' },
+  { id: 'legend', name: '傳說', min: 0, color: '#F4C95D' },
+];
+const RUST_PER_PASS = 0.75; // rust scrubbed from a segment per full pass on a rust-1.0 stone
+const RUST_SLOW = 0.8; // a fully rusted segment sharpens this much slower
 const WEAR_COLS = 28; // stone top subdivisions along its length (wear profile resolution)
 const WEAR_ROWS = 6;
 const WEAR_DEPTH = 0.0025; // m: deepest dish a stone can get
@@ -385,11 +414,11 @@ const stoneHolder = new THREE.Group();
   stoneHolder.position.x = STATION_X;
   onTable.add(stoneHolder);
 }
-// Where the stones sit: [in the holder, rest slot A, rest slot B] (onTable-local)
+// Where the stones sit: [in the holder, then a rack of rest slots along the back edge] (onTable-local).
+// Resting stones lie crosswise in grit order, so the ladder #120 → #30000 reads left to right.
 const STONE_SLOTS = [
   { x: STATION_X, y: HOLDER_H, z: 0, ry: 0 },
-  { x: -0.25, y: 0, z: -0.2, ry: 0.12 },
-  { x: 0.2, y: 0, z: -0.2, ry: -0.1 },
+  ...Array.from({ length: STONES.length - 1 }, (_, i) => ({ x: -0.3 + i * 0.088, y: 0, z: -0.27, ry: Math.PI / 2 + (i % 2 ? 0.05 : -0.04) })),
 ];
 const stones = STONES.map((def) => {
   const geo = new THREE.BoxGeometry(STONE_LEN, STONE_H, STONE_W, WEAR_COLS, 1, WEAR_ROWS);
@@ -657,6 +686,7 @@ function bladeVertex(target, x, v, side) {
 function buildBladeGeometry() {
   const pos = [];
   const idx = [];
+  const uv = []; // u = heel -> tip, v = edge -> spine (material-knife textures and the rust overlay)
   const v3 = new THREE.Vector3();
   const NV = V_ROWS.length;
   for (const side of [1, -1]) {
@@ -665,6 +695,7 @@ function buildBladeGeometry() {
       for (let j = 0; j < NV; j++) {
         bladeVertex(v3, (i / (NX - 1)) * BLADE_LEN, V_ROWS[j], side);
         pos.push(v3.x, v3.y, v3.z);
+        uv.push(i / (NX - 1), V_ROWS[j]);
       }
     }
     for (let i = 0; i < NX - 1; i++) {
@@ -681,6 +712,7 @@ function buildBladeGeometry() {
     for (const side of [1, -1]) {
       bladeVertex(v3, (i / (NX - 1)) * BLADE_LEN, 1, side);
       pos.push(v3.x, v3.y, v3.z);
+      uv.push(i / (NX - 1), 1);
     }
   }
   for (let i = 0; i < NX - 1; i++) {
@@ -693,12 +725,14 @@ function buildBladeGeometry() {
     for (let j = 0; j < NV; j++) {
       bladeVertex(v3, 0, V_ROWS[j], side);
       pos.push(v3.x, v3.y, v3.z);
+      uv.push(0, V_ROWS[j]);
     }
   }
   for (let j = 0; j < NV - 1; j++) idx.push(heel + j, heel + NV + j, heel + NV + j + 1, heel + j, heel + NV + j + 1, heel + j + 1);
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
   geo.setIndex(idx);
   geo.computeVertexNormals();
   return geo;
@@ -742,9 +776,27 @@ const gleamMat = new THREE.MeshBasicMaterial({
   side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4,
 });
 
+// Rust overlay (鐵鏽菜刀): the blade surface again, with a per-vertex alpha = rust level that dissolves
+// through a cloudy noise map (alphaTest), so patches flake off unevenly as each segment is ground.
+const rustGeo = new THREE.BufferGeometry();
+for (const k of ['position', 'normal', 'uv']) rustGeo.setAttribute(k, bladeGeo.attributes[k]);
+rustGeo.setIndex(bladeGeo.index);
+rustGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(bladeGeo.attributes.position.count * 4).fill(1), 4).setUsage(THREE.DynamicDrawUsage));
+const rustTex = makeRustTextures();
+const rustMat = new THREE.MeshStandardMaterial({
+  map: rustTex.map, alphaMap: rustTex.alpha, alphaTest: 0.5, vertexColors: true, roughness: 0.95, metalness: 0.15,
+  side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2,
+});
+const bladeMeshes = []; // every knife instance's blade (material knives swap its material)
+const rustMeshes = [];
+
 function buildKnife() {
   const knife = new THREE.Group();
   const blade = mesh(bladeGeo, mat.blade);
+  bladeMeshes.push(blade);
+  const rust = mesh(rustGeo, rustMat, false, false);
+  rust.visible = false;
+  rustMeshes.push(rust);
   const gleam = mesh(gleamGeo, gleamMat, false, false);
   gleam.renderOrder = 2;
   const HY = BLADE_H - 0.015; // handle axis height (in line with the spine)
@@ -755,7 +807,7 @@ function buildKnife() {
   const rivets = merged([-0.03, -0.065, -0.1].map((x) => place(new THREE.CylinderGeometry(0.0022, 0.0022, 0.0175, 8), x, HY, 0, Math.PI / 2)), mat.steel, false, false);
   const butt = mesh(new THREE.SphereGeometry(0.0085, 10, 6).scale(0.6, 1.1, 0.75), mat.steel);
   butt.position.set(-0.128, HY + 0.0005, 0);
-  knife.add(blade, gleam, bolster, handle, rivets, butt);
+  knife.add(blade, rust, gleam, bolster, handle, rivets, butt);
   return knife;
 }
 
@@ -921,11 +973,15 @@ const HEAT_COLORS = [CLIMAX.heat, new THREE.Color('#fff2c4')];
 const DROP_COLOR = new THREE.Color('#cfe8ff');
 const ICE_COLOR = new THREE.Color('#E8F1F8');
 const STRAW_COLORS = ['#DCD3C3', '#B08A63', '#C9D8C5'].map((c) => new THREE.Color(c));
+const TOMATO_COLORS = ['#D7263D', '#F07C5A', '#F4C95D'].map((c) => new THREE.Color(c));
+const WATER_COLORS = ['#E8F1F8', '#CFE8FF', '#9FD0EA'].map((c) => new THREE.Color(c));
 const CHIP_COLORS = ['#7C7A75', '#5C5650', '#DCD3C3'].map((c) => new THREE.Color(c));
 // Slurry (研ぎ汁): muddy grey droplets tinted by each stone (stone colour mixed with palette stone grey)
 const SLURRY_GREY = new THREE.Color('#7C7A75');
 const SLURRY_COLORS = STONES.map((d) => [0.55, 0.75].map((k) => new THREE.Color(d.color).lerp(SLURRY_GREY, k).multiplyScalar(0.85)));
 const GLINT_COLORS = [CLIMAX.gleam, new THREE.Color('#ffffff')];
+const RUST_SLURRY = ['#8A4A22', '#B0602C', '#5A2E14'].map((c) => new THREE.Color(c)); // orange-brown rust slurry
+const RUST_FLAKES = ['#B0602C', '#D68C46', '#6A3416'].map((c) => new THREE.Color(c));
 
 function burst(system, at, n, speed, colors, life) {
   for (let i = 0; i < n; i++) {
@@ -1140,6 +1196,54 @@ const audio = {
     this.tone(210, 0.12, 0.18, 'triangle');
     this.noiseBurst(0.07, 'lowpass', 1800, 300, 0.3);
   },
+  /** Tester press: a taut-thread creak rising in pitch while the force builds (k = force / no-cut). */
+  strain(duration, k) {
+    if (!this.ctx) return;
+    const ctx = this.ctx, t = ctx.currentTime;
+    const o = ctx.createOscillator();
+    o.type = 'sawtooth';
+    o.frequency.setValueAtTime(110, t);
+    o.frequency.exponentialRampToValueAtTime(140 + 520 * Math.min(1.1, k), t + duration);
+    const f = ctx.createBiquadFilter();
+    f.type = 'bandpass'; f.Q.value = 6;
+    f.frequency.setValueAtTime(500, t);
+    f.frequency.exponentialRampToValueAtTime(900 + 1600 * Math.min(1.1, k), t + duration);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.05, t + 0.15);
+    g.gain.setValueAtTime(0.05, t + duration * 0.9);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + duration + 0.05);
+    o.connect(f).connect(g).connect(this.master);
+    o.start(t);
+    o.stop(t + duration + 0.1);
+  },
+  /** The thread parts: a bright tick + a short twang; keener edges snap cleaner and higher. */
+  snap(gradeId) {
+    if (!this.ctx) return;
+    const hi = { dull: 0, usable: 1, sharp: 2, razor: 3, legend: 4 }[gradeId] ?? 0;
+    this.noiseBurst(0.05, 'highpass', 5000, 2500, 0.32);
+    this.tone(2600 + hi * 300, 0.12, 0.09, 'triangle');
+    this.tone(196 + hi * 22, 0.35, 0.06, 'sawtooth', 0.01);
+  },
+  /** Grade stinger after a reading: dull = low knock … legend = temple bell + rising chord. */
+  grade(i) {
+    if (!this.ctx) return;
+    if (i <= 0) { this.tone(196, 0.3, 0.12, 'triangle'); return; }
+    if (i >= 4) { this.bell(); this.chime(4); return; }
+    const notes = [[523, 659], [587, 740, 880], [659, 831, 988, 1319]][i - 1];
+    notes.forEach((f, k) => this.tone(f, 0.5, 0.08, 'sine', k * 0.07));
+  },
+  /** Water bursting out of a sliced bottle: a wet slap, a falling sheet, then scattered drips. */
+  splash() {
+    if (!this.ctx) return;
+    this.noiseBurst(0.12, 'bandpass', 1400, 500, 0.45);
+    this.noiseBurst(0.9, 'lowpass', 2600, 300, 0.22);
+    for (let i = 0; i < 9; i++) {
+      const f = 700 + Math.random() * 900;
+      this.tone(f, 0.08, 0.035, 'sine', 0.25 + i * 0.09 + Math.random() * 0.05);
+      this.tone(f * 1.5, 0.05, 0.015, 'sine', 0.27 + i * 0.09);
+    }
+  },
   /** Heavy target: low boom under the slice. */
   boom(weight) {
     if (!this.ctx) return;
@@ -1211,6 +1315,10 @@ const ui = {
   orderAvatar: $('orderAvatar'), resultAvatar: $('resultAvatar'), resultCustomer: $('resultCustomer'), resultHead: $('resultHead'),
   resultScore: $('resultScore'), retryBtn: $('retryBtn'), nextOrderBtn: $('nextOrderBtn'), titleBtn: $('titleBtn'),
   shareBtn: $('shareBtn'), hapticBtn: $('hapticBtn'),
+  lab: $('lab'), labBtn: $('labBtn'), labCards: $('labCards'), labBackBtn: $('labBackBtn'), labHud: $('labHud'),
+  measureBtn: $('measureBtn'), meter: $('meter'), meterLive: $('meterLive'), meterGrams: $('meterGrams'), meterGrade: $('meterGrade'),
+  meterNote: $('meterNote'), meterChart: $('meterChart'), meterKicker: $('meterKicker'), meterBackBtn: $('meterBackBtn'), meterNextBtn: $('meterNextBtn'),
+  narr: $('narr'),
 };
 let hapticsEnabled = true;
 try {
@@ -1238,7 +1346,7 @@ for (const t of TARGETS) {
 }
 const stoneBtns = STONES.map((d) => {
   const b = document.createElement('button');
-  b.innerHTML = `<b>${d.name}</b><small>${d.grit}</small><i style="background:${d.color}"></i>`;
+  b.innerHTML = `<b>${d.grit.slice(1)}</b><small>${d.name}</small><i style="background:${d.color}"></i>`;
   b.setAttribute('aria-label', `${d.name}砥石 ${d.grit}`);
   ui.stones.appendChild(b);
   return b;
@@ -1338,6 +1446,7 @@ const seg = {
   flash: new Float32Array(SEGS),
   norm: new Float32Array(SEGS),
   shown: new Int16Array(SEGS).fill(-1),
+  rust: new Float32Array(SEGS), // 0..1 rust left on each segment (鐵鏽菜刀)
 };
 const segCenter = (i) => (i + 0.5) / SEGS;
 const segWeight = (i, u) => Math.max(0, 1 - Math.abs(segCenter(i) - u) / SEG_WINDOW);
@@ -1359,6 +1468,35 @@ function pressureEfficiency(p) {
   if (p <= PRESS_HI) return 1;
   return Math.max(0.3, 1 - ((p - PRESS_HI) / (1 - PRESS_HI)) * 0.7);
 }
+// The knife on the stone: the plain gyuto (orders / free mode) or a material knife (素材工房).
+const PLAIN_KNIFE = { id: 'gyuto', name: '牛刀', short: '牛刀', kind: 'metal', max: 1, rate: 1, start: 0, rust: 0, chips: null, grit: 0, wobble: 0, r0: 0.38, r1: 0.12 };
+let knifeDef = PLAIN_KNIFE;
+/** Highest sharpness reachable right now: the stone's cap, or the material's own limit if lower. */
+const effCap = (st = STONES[game.stone]) => Math.min(st.cap, knifeDef.max);
+const bladeMatCache = new Map();
+const chipColorCache = new Map();
+let rustDirty = true;
+function setKnifeMaterial(def = PLAIN_KNIFE) {
+  knifeDef = def;
+  let m = mat.blade;
+  if (def.kind !== 'metal') {
+    if (!bladeMatCache.has(def.id)) bladeMatCache.set(def.id, makeBladeMaterial(def));
+    m = bladeMatCache.get(def.id);
+  }
+  for (const b of bladeMeshes) b.material = m;
+  if (def.chips && !chipColorCache.has(def.id)) chipColorCache.set(def.id, def.chips.map((c) => new THREE.Color(c)));
+  seg.rust.fill(def.rust || 0);
+  rustDirty = true;
+  sharpKnife.scale.set(1, 1, 1);
+  sharpKnife.rotation.x = 0;
+  setKnifeFinish(game.sharpness);
+}
+const avgRust = () => seg.rust.reduce((a, b) => a + b, 0) / SEGS;
+/** Tester reading for the current edge: grams to part the thread (lower = sharper). */
+function cutForce(s = game.sharpness, rust = avgRust()) {
+  return FORCE.dull * Math.pow(FORCE.sharp / FORCE.dull, clamp(s, 0, 1)) * (1 + rust * FORCE.rustDrag);
+}
+const gradeOf = (g) => GRADES.find((x) => g >= x.min) || GRADES[GRADES.length - 1];
 const angleState = () => (game.angle >= BAND_LO && game.angle <= BAND_HI ? 'good' : game.angle >= BAND_LO - 3 && game.angle <= BAND_HI + 3 ? 'near' : 'bad');
 const pressureOK = () => game.pressure >= PRESS_LO && game.pressure <= PRESS_HI;
 
@@ -1475,7 +1613,7 @@ function onButton(el, fn) {
 }
 onButton(ui.testBtn, () => { if (canSharpen()) runTest(TARGETS[cutIdx()].id); });
 onButton(ui.againBtn, () => backToSharpen(false));
-onButton(ui.restartBtn, () => backToSharpen(true));
+onButton(ui.restartBtn, () => { if (flow.mode === 'lab') showLab(); else backToSharpen(true); });
 onButton(ui.nextBtn, () => { if (game.mode === 'result') runTest(TARGETS[game.selected].id); });
 onButton(ui.startBtn, () => startOrder());
 onButton(ui.freeBtn, () => startFree());
@@ -1489,7 +1627,12 @@ onButton(ui.hapticBtn, () => {
   setHaptics(!hapticsEnabled);
 });
 onButton(ui.shareBtn, () => { shareScore().catch(() => {}); });
-stoneBtns.forEach((b, i) => b.addEventListener('click', () => { audio.unlock(); if (flow.screen === 'sharpen') selectStone(i); }));
+stoneBtns.forEach((b, i) => b.addEventListener('click', () => {
+  audio.unlock();
+  if (flow.screen !== 'sharpen') return;
+  if (i > stoneMax()) return lockedStoneTap(i);
+  selectStone(i);
+}));
 targetBtns.forEach((b, i) => b.addEventListener('click', () => {
   audio.unlock();
   if (!canSharpen() || flow.mode === 'order') return;
@@ -1536,8 +1679,7 @@ function selectStone(i, instant = false) {
   game.stone = i;
   const def = STONES[i];
   stoneBtns.forEach((b, k) => b.classList.toggle('on', k === i));
-  ui.capMark.style.display = def.cap >= 1 ? 'none' : '';
-  ui.capMark.style.left = `${def.cap * 100}%`;
+  updateCapMark();
   if (instant) {
     placeStones(i);
     return;
@@ -1547,6 +1689,7 @@ function selectStone(i, instant = false) {
   drag = second = null; // lift the knife while the stones swap
   audio.setGrind(0);
   toast(`${def.name}砥 ${def.grit}`, 0.8);
+  refreshStoneButtons();
   stoneSwap = tween(0.35, (k) => placeStones(i, k, from), easeInOut).then(() => {
     stoneSwitching = false;
     audio.stoneSwap();
@@ -1587,6 +1730,7 @@ function checkUnlocks(quiet = flow.mode === 'order') {
     if (!quiet) {
       audio.bell();
       toast(`解鎖試刀：${TARGETS[game.unlocked].name}`, 1.5);
+      if (flow.mode === 'lab' && TARGETS[game.unlocked].id === knifeDef.goal) narrate(`${knifeDef.name}，已經可以挑戰${TARGETS[game.unlocked].name}了。`, 3.2);
       const b = targetBtns[game.unlocked];
       b.classList.remove('fresh');
       void b.offsetWidth; // restart the CSS animation
@@ -1661,20 +1805,30 @@ function updateSharpening(dt, t) {
   const du = Math.abs(game.edgeU - prevU);
   game.burr = damp(game.burr, grinding && game.pressure > PRESS_HI ? 1 : 0, 3, dt);
   const stoneX = game.knifeX * 0.75; // contact point in stone-local x
+  const cap = effCap(st);
   if (grinding && du > 0) {
-    const eff = angleEfficiency(game.angle) * pressureEfficiency(game.pressure) * st.rate;
+    const eff = angleEfficiency(game.angle) * pressureEfficiency(game.pressure) * st.rate * knifeDef.rate;
+    const scrub = RUST_PER_PASS * st.rust * (0.4 + 0.6 * pressureEfficiency(game.pressure));
     stats.dist += du;
     if (game.angle >= BAND_LO && game.angle <= BAND_HI) stats.angleDist += du;
     if (pressureOK()) stats.pressDist += du;
     for (let i = 0; i < SEGS; i++) {
       const w = segWeight(i, game.edgeU);
       if (w <= 0) continue;
+      if (seg.rust[i] > 0) { // rust comes off first (fast on the coarse grits); it slows sharpening
+        const before = seg.rust[i];
+        seg.rust[i] = Math.max(0, before - ((du * w) / seg.norm[i]) * scrub);
+        if (seg.rust[i] < 0.04) seg.rust[i] = 0;
+        rustDirty = true;
+        if (before > 0 && seg.rust[i] === 0) onRustCleared(i);
+      }
       const p = seg.progress[i];
-      const room = st.cap - p;
-      if (room <= 0) continue; // this grit can't refine the edge any further
+      const room = cap - p;
+      if (room <= 0) continue; // this grit (or the material itself) can't refine the edge any further
       // Slows in the last third of the stone's range so the cap is approached, not slammed into.
-      const ease = 0.3 + 0.7 * Math.min(1, (room / st.cap) * 3);
-      seg.progress[i] = Math.min(st.cap, p + ((du * eff * GAIN_PER_PASS * w) / seg.norm[i]) * (1 - 0.55 * p) * ease);
+      const ease = 0.3 + 0.7 * Math.min(1, (room / cap) * 3);
+      const rustSlow = 1 - RUST_SLOW * seg.rust[i];
+      seg.progress[i] = Math.min(cap, p + ((du * eff * GAIN_PER_PASS * w) / seg.norm[i]) * (1 - 0.55 * p) * ease * rustSlow);
       while (seg.level[i] < SEG_LEVELS.length && seg.progress[i] >= SEG_LEVELS[seg.level[i]] - 1e-6) {
         seg.level[i]++;
         onSegmentLevel(i, seg.level[i]);
@@ -1696,6 +1850,15 @@ function updateSharpening(dt, t) {
   }
   recomputeSharpness();
   checkUnlocks();
+  if (st.mirror && knifeDef.kind === 'metal' && !game.mirrored && game.sharpness >= 0.95) { // #30000: the flats turn to mirror
+    game.mirrored = true;
+    audio.bell();
+    haptic(HAPTIC_DING);
+    toast('鏡面', 1.6);
+    narrate('刀面映出了整間工房。', 3.2);
+    sharpKnife.localToWorld(tmpP.set(BLADE_LEN * 0.5, BLADE_H * 0.5, 0));
+    burst(glints, tmpP, 16, 0.3, GLINT_COLORS, 0.7);
+  }
   if (flow.mode === 'order' && flow.order) {
     if (stats.goalDist < 0 && game.sharpness >= flow.order.goal - 1e-6) stats.goalDist = stats.dist;
     const ready = game.sharpness >= flow.order.need - 1e-6;
@@ -1727,13 +1890,20 @@ function updateSharpening(dt, t) {
   knifeTilt.rotation.x = THREE.MathUtils.degToRad(90 - game.angle);
   knifeContact.rotation.z = -Math.atan(edgeSlope(ex));
   sharpKnife.position.set(-ex, -edgeY(ex), 0);
+  if (knifeDef.wobble) { // jelly: the blade jiggles, harder while it's being pushed
+    game.wobble = damp(game.wobble || 0, grinding ? 1 : 0.25, 6, dt);
+    const j = knifeDef.wobble * game.wobble;
+    sharpKnife.scale.y = 1 + Math.sin(t * 23) * 0.05 * j;
+    sharpKnife.scale.z = 1 - Math.sin(t * 23) * 0.04 * j;
+    sharpKnife.rotation.x = Math.sin(t * 17 + 1) * 0.05 * j;
+  }
   setKnifeFinish(game.sharpness);
 
   // Particles at the contact point: sparks on the coarse stone, muddy slurry on medium / fine.
   knifeRoot.getWorldPosition(contact);
   if (grinding) {
     const dirX = Math.sign(v) || 1;
-    const slurry = SLURRY_COLORS[game.stone];
+    const slurry = chipColorCache.get(knifeDef.id) || (avgRust() > 0.05 ? RUST_SLURRY : SLURRY_COLORS[game.stone]);
     if (dirX !== game.lastDir) stats.strokes++; // one stroke per push / pull
     if (game.lastDir && dirX !== game.lastDir && game.speed > 0.15 && st.fx === 'slurry') {
       burst(drops, contact, 4, 0.35, slurry, 0.45); // splash at the stroke reversal
@@ -1763,24 +1933,31 @@ function updateSharpening(dt, t) {
   const sd = st.sound;
   const level = grinding ? Math.min(1, game.speed * 1.3) * (0.35 + 0.65 * game.pressure) * (inBand ? 1 : 0.75) : 0;
   const freq = lerp(sd.f0, sd.f1, clamp(game.speed, 0, 1)) * (0.9 + game.pressure * 0.25) * (inBand ? 1.08 : 0.92) * (1 - game.burr * 0.3);
-  audio.setGrind(level, freq, sd, game.burr);
+  audio.setGrind(level, freq, sd, game.burr + knifeDef.grit * 0.6 + avgRust() * 0.5);
 
   // Coaching hint (throttled to avoid flicker); gentle tone, never "fail".
   game.hintTimer -= dt;
   if (game.hintTimer <= 0) {
     game.hintTimer = 0.3;
-    const capped = st.cap < 1 && game.sharpness >= st.cap - 0.01;
+    const matLimit = knifeDef.max < 1 && knifeDef.max <= st.cap && game.sharpness >= knifeDef.max - 0.01;
+    const capped = !matLimit && cap < 1 && game.sharpness >= cap - 0.01;
     let msg = DEFAULT_HINT;
     if (down) {
       if (game.angle > BAND_HI) msg = '角度稍陡 ↓ 手指往下一點';
       else if (game.angle < BAND_LO) msg = '角度稍平 ↑ 手指往上一點';
-      else if (capped) msg = `${st.name}砥最多磨到 ${Math.round(st.cap * 100)}%，換更細的砥石`;
+      else if (matLimit) msg = `${knifeDef.short}的極限就是這裡了・去試刀吧`;
+      else if (capped) msg = `${st.grit} 最多磨到 ${Math.round(cap * 100)}%，換更細的砥石`;
+      else if (avgRust() > 0.05 && game.stone <= 1) msg = '鏽正在剝落…繼續推！';
       else if (!grinding) msg = '角度剛好，左右來回推！';
       else if (game.pressure < PRESS_LO) msg = '壓力偏輕，推快一點';
       else if (game.pressure > PRESS_HI) msg = '太用力會起毛邊，放慢一點';
       else msg = '很好！刃口在發亮';
+    } else if (matLimit) {
+      msg = `${knifeDef.short}刀已到極限・按「測試」或去試刀`;
     } else if (capped) {
-      msg = `${st.name}砥已到極限 ${Math.round(st.cap * 100)}%，點左側換砥石`;
+      msg = `${st.grit} 已到極限 ${Math.round(cap * 100)}%・${flow.mode === 'lab' ? '按「測試」量一次再換石' : '點左側換砥石'}`;
+    } else if (avgRust() > 0.3) {
+      msg = '刀身滿是鐵鏽：先用荒砥把鏽推掉';
     } else if (game.sharpness > 0.03) {
       msg = '推到左右兩端，讓整條刃口都亮起來';
     }
@@ -1789,7 +1966,54 @@ function updateSharpening(dt, t) {
 }
 
 function setKnifeFinish(s) {
-  mat.blade.roughness = lerp(0.38, 0.12, s);
+  const d = knifeDef;
+  if (d.kind === 'metal') {
+    // #30000 territory (> 0.9) polishes the flats to a mirror (鏡面): near-zero roughness, stronger reflections.
+    const mirror = clamp((s - 0.9) / 0.1, 0, 1);
+    mat.blade.roughness = s <= 0.9 ? lerp(0.38, 0.12, s / 0.9) : lerp(0.12, 0.025, mirror);
+    mat.blade.envMapIntensity = 1.3 + mirror * 0.9;
+  } else {
+    const m = bladeMatCache.get(d.id);
+    if (m) m.roughness = lerp(d.r0, d.r1, clamp(s / d.max, 0, 1));
+  }
+}
+
+/** A segment's last rust flakes off: flakes + glints there; the whole blade clear rings a chord. */
+function onRustCleared(i) {
+  const x = edgeXAt(segCenter(i));
+  sharpKnife.localToWorld(tmpP.set(x, edgeY(x) + 0.012, 0));
+  burst(drops, tmpP, 8, 0.3, RUST_FLAKES, 0.6);
+  burst(glints, tmpP, 4, 0.12, GLINT_COLORS, 0.4);
+  seg.flash[i] = Math.max(seg.flash[i], 0.6);
+  audio.tick(true);
+  if (seg.rust.every((r) => r === 0)) {
+    audio.chime(2);
+    haptic(HAPTIC_DING);
+    toast('除鏽完成！', 1.4);
+    narrate('鏽掉下來了。底下的鋼，還記得自己是一把刀。', 3.2);
+  }
+}
+
+// Rust overlay: per-vertex alpha follows the per-segment rust (interpolated between segment centres).
+const rustAlpha = rustGeo.attributes.color;
+const rustVtxSeg = new Float32Array(rustAlpha.count);
+for (let v = 0; v < rustAlpha.count; v++) {
+  rustVtxSeg[v] = clamp((bladeGeo.attributes.position.getX(v) - edgeXAt(0)) / (edgeXAt(1) - edgeXAt(0)), 0, 1) * SEGS - 0.5;
+}
+function updateRustOverlay() {
+  if (!rustDirty) return;
+  rustDirty = false;
+  let any = 0;
+  for (let i = 0; i < SEGS; i++) any = Math.max(any, seg.rust[i]);
+  for (const m of rustMeshes) m.visible = any > 0;
+  if (!any) return;
+  const arr = rustAlpha.array;
+  for (let v = 0; v < rustAlpha.count; v++) {
+    const f = rustVtxSeg[v];
+    const i0 = clamp(Math.floor(f), 0, SEGS - 1), i1 = Math.min(SEGS - 1, i0 + 1);
+    arr[v * 4 + 3] = lerp(seg.rust[i0], seg.rust[i1], clamp(f - i0, 0, 1)) * 3; // alphaTest 0.5 vs noise × level
+  }
+  rustAlpha.needsUpdate = true;
 }
 
 // Gleam line colours (both faces): segment progress + completion flash + a slow highlight sweep.
@@ -1826,6 +2050,8 @@ function updateHUD() {
   setDom(ui.pressText, 'text', !drag ? '' : pressureOK() ? '剛好' : game.pressure > PRESS_HI ? '太重' : '太輕');
   setDom(sliderThumb, 'top', `${angleToPct(game.angle)}%`);
   setDom(sliderThumb, 'class', `thumb ${st}`);
+  const due = flow.mode === 'lab' && game.mode === 'sharpen' && stageDone() && meter.last?.col !== game.stone + 1;
+  setDom(ui.measureBtn, 'class', `secondary${due ? ' ready' : ''}`);
   const cur = drag ? Math.min(SEGS - 1, Math.floor(game.edgeU * SEGS)) : -1;
   for (let i = 0; i < SEGS; i++) {
     const pct = Math.round(seg.progress[i] * 20) * 5;
@@ -1843,13 +2069,18 @@ function updateHUD() {
 // the cut-face centre, per 05-model-specs). The halves stay hidden until the cut. No runtime slicing.
 // Target-local frame: bottom at y = 0 (top of the chopping block), cut plane through `c`.
 // ---------------------------------------------------------------------------
-const CUT_N = new THREE.Vector3(Math.cos(CUT_TILT), Math.sin(CUT_TILT), 0); // cut-plane normal
-const CUT_U = new THREE.Vector3(-Math.sin(CUT_TILT), Math.cos(CUT_TILT), 0); // in-plane, up the slash line
-const CUT_D = CUT_U.clone().negate(); // slash direction
+// Cut-plane basis for a tilt (radians off vertical): N = plane normal, U = in-plane up the slash line,
+// D = slash direction. Most targets use CUT_TILT; the bottle is sliced almost level (TARGETS[].tilt).
+function cutBasis(tilt) {
+  const N = new THREE.Vector3(Math.cos(tilt), Math.sin(tilt), 0);
+  const U = new THREE.Vector3(-Math.sin(tilt), Math.cos(tilt), 0);
+  return { tilt, N, U, D: U.clone().negate() };
+}
 const CUT_Z = new THREE.Vector3(0, 0, 1); // in-plane, along the edge
 
-/** Build-time split of a closed mesh by the cut plane through c. Returns both capped halves. */
-function splitGeometry(src, c) {
+/** Build-time split of a closed mesh by the cut plane (basis B) through c. Returns both capped halves. */
+function splitGeometry(src, c, B) {
+  const { N: CUT_N, U: CUT_U } = B;
   const g = src.index ? src.toNonIndexed() : src.clone();
   if (!g.attributes.normal) g.computeVertexNormals();
   const P = g.attributes.position, N = g.attributes.normal, UV = g.attributes.uv;
@@ -1942,11 +2173,117 @@ function flattenBelow(geo, y0) {
   return geo;
 }
 
-const STRAW = new THREE.Color('#DCD3C3').lerp(new THREE.Color('#B08A63'), 0.35);
 // Per target: geometry, surface / cap materials, cut centre, props (not cut), separation of the halves, impact fx.
 //   anim: upper half (on the +normal side) slides `slide` down the cut, opens by `gap`, falls `fall`, spins `spin`;
 //         lower half opens by `gapLow` and tilts `tilt`; both hop by `hop`.
 const TARGET_BUILD = {
+  tomato: () => {
+    const geo = new THREE.SphereGeometry(0.048, 16, 10).scale(1, 0.82, 1);
+    const p = geo.attributes.position;
+    for (let i = 0; i < p.count; i++) { // soft lobes around the equator, like a real tomato
+      const a = Math.atan2(p.getZ(i), p.getX(i));
+      const k = 1 + 0.045 * Math.cos(a * 5) * (1 - Math.abs(p.getY(i)) / 0.04);
+      p.setX(i, p.getX(i) * k);
+      p.setZ(i, p.getZ(i) * k);
+    }
+    geo.translate(0, 0.039, 0);
+    const calyx = [];
+    for (let i = 0; i < 5; i++) {
+      const a = (i / 5) * Math.PI * 2;
+      calyx.push(place(new THREE.ConeGeometry(0.006, 0.03, 3), Math.cos(a) * 0.011, 0.078, Math.sin(a) * 0.011, 0, -a, Math.PI / 2 - 0.25, 1, 1, 0.4));
+    }
+    calyx.push(place(new THREE.CylinderGeometry(0.0025, 0.003, 0.014, 5), 0, 0.084, 0));
+    return {
+      geo,
+      surface: new THREE.MeshPhysicalMaterial({ color: '#D7263D', roughness: 0.28, clearcoat: 0.8, clearcoatRoughness: 0.2 }),
+      cap: new THREE.MeshStandardMaterial({
+        roughness: 0.4,
+        map: canvasTex(128, (g, n) => { // cross-section: flesh, four seed chambers, pale core
+          g.fillStyle = '#E2453A'; g.fillRect(0, 0, n, n);
+          g.fillStyle = '#C81E2E'; g.beginPath(); g.arc(n / 2, n / 2, n * 0.47, 0, Math.PI * 2); g.lineWidth = n * 0.05; g.strokeStyle = '#B5162A'; g.stroke();
+          for (let i = 0; i < 4; i++) {
+            const a = (i / 4) * Math.PI * 2 + 0.4;
+            g.fillStyle = '#F07C5A';
+            g.beginPath(); g.ellipse(n / 2 + Math.cos(a) * n * 0.22, n / 2 + Math.sin(a) * n * 0.22, n * 0.13, n * 0.09, a, 0, Math.PI * 2); g.fill();
+            g.fillStyle = '#F4C95D';
+            for (let k = 0; k < 5; k++) { g.beginPath(); g.ellipse(n / 2 + Math.cos(a) * n * (0.16 + k * 0.03), n / 2 + Math.sin(a) * n * (0.16 + k * 0.03) + (k % 2 ? 4 : -4), 2.2, 1.4, a, 0, Math.PI * 2); g.fill(); }
+          }
+          g.fillStyle = '#F6A08A'; g.beginPath(); g.arc(n / 2, n / 2, n * 0.08, 0, Math.PI * 2); g.fill();
+        }),
+      }),
+      props: [],
+      extras: [merged(calyx, flat('#3F7A3A', 0.8), false, false)],
+      anim: { slide: 0.03, gap: 0.01, fall: 0.03, spin: 0.7, flutter: 0, gapLow: 0.006, tilt: 0.12, hop: 0.01 },
+      fx: 'tomato', weight: 0,
+    };
+  },
+  rope: () => ({
+    geo: new THREE.CylinderGeometry(0.0085, 0.0085, 0.25, 8, 6).translate(0, 0.02 + 0.125, 0),
+    surface: new THREE.MeshStandardMaterial({
+      roughness: 0.95,
+      map: canvasTex(128, (g, n) => { // three twisted strands: diagonal bands with fibre hatching
+        g.fillStyle = '#C9A06A'; g.fillRect(0, 0, n, n);
+        for (let i = -n; i < n * 2; i += 16) {
+          g.fillStyle = 'rgba(110,80,40,0.45)';
+          g.beginPath(); g.moveTo(i, 0); g.lineTo(i + 6, 0); g.lineTo(i + 6 - n * 0.6, n); g.lineTo(i - n * 0.6, n); g.fill();
+        }
+        for (let i = 0; i < 180; i++) { g.fillStyle = Math.random() < 0.5 ? 'rgba(255,240,210,0.35)' : 'rgba(80,55,25,0.3)'; g.fillRect(Math.random() * n, Math.random() * n, 3, 1); }
+      }),
+    }),
+    cap: new THREE.MeshStandardMaterial({
+      roughness: 0.95,
+      map: canvasTex(64, (g, n) => { // frayed end: three strand circles
+        g.fillStyle = '#B08A63'; g.fillRect(0, 0, n, n);
+        g.fillStyle = '#E3C79A';
+        for (let i = 0; i < 3; i++) { const a = (i / 3) * Math.PI * 2; g.beginPath(); g.arc(n / 2 + Math.cos(a) * n * 0.17, n / 2 + Math.sin(a) * n * 0.17, n * 0.2, 0, Math.PI * 2); g.fill(); }
+        for (let i = 0; i < 90; i++) { g.fillStyle = 'rgba(90,60,30,0.35)'; g.fillRect(Math.random() * n, Math.random() * n, 1, 1); }
+      }),
+    }),
+    props: [merged([ // a small wooden gallows: base, two posts, top bar; the rope is tied taut between them
+      place(new THREE.BoxGeometry(0.16, 0.014, 0.05), 0, 0.007, 0),
+      place(new THREE.BoxGeometry(0.014, 0.29, 0.014), -0.07, 0.145, 0),
+      place(new THREE.BoxGeometry(0.014, 0.29, 0.014), 0.07, 0.145, 0),
+      place(new THREE.BoxGeometry(0.17, 0.016, 0.022), 0, 0.29, 0),
+      place(new THREE.CylinderGeometry(0.013, 0.013, 0.012, 8), 0, 0.276, 0),
+      place(new THREE.CylinderGeometry(0.013, 0.013, 0.012, 8), 0, 0.02, 0),
+    ], mat.darkWood)],
+    anim: { slide: 0.012, gap: 0.004, fall: 0, spin: 0.35, flutter: 0, gapLow: 0.006, tilt: 0.3, hop: 0.012 },
+    fx: 'rope', weight: 0,
+  }),
+  bottle: () => {
+    // 500 ml PET bottle as a closed lathe (solid, so the cut face is the water-filled section).
+    const prof = [[0, 0], [0.026, 0], [0.0325, 0.006], [0.0335, 0.03], [0.032, 0.036], [0.0335, 0.042], [0.0335, 0.14],
+      [0.031, 0.152], [0.024, 0.168], [0.014, 0.186], [0.0105, 0.194], [0.0105, 0.2], [0, 0.2]];
+    const geo = new THREE.LatheGeometry(prof.map(([r, y]) => new THREE.Vector2(r, y)), 18);
+    const cap = merged([
+      place(new THREE.CylinderGeometry(0.0118, 0.0118, 0.016, 14), 0, 0.208, 0),
+      place(new THREE.TorusGeometry(0.0115, 0.0012, 4, 14), 0, 0.2, 0, Math.PI / 2),
+    ], new THREE.MeshStandardMaterial({ color: '#E8F1F8', roughness: 0.4 }), false, false);
+    const label = mesh(new THREE.CylinderGeometry(0.0342, 0.0342, 0.052, 18, 1, true).translate(0, 0.088, 0),
+      new THREE.MeshStandardMaterial({ roughness: 0.6, side: THREE.DoubleSide, map: canvasTex(256, (g, n) => {
+        // Original label: an invented spring-water brand, mountains and a wave
+        g.fillStyle = '#F5EFE6'; g.fillRect(0, 0, n, n);
+        g.fillStyle = '#4E6E7E'; g.fillRect(0, 0, n, n * 0.18); g.fillRect(0, n * 0.82, n, n * 0.18);
+        g.fillStyle = '#9FB7C9';
+        g.beginPath(); g.moveTo(0, n * 0.8); g.lineTo(n * 0.18, n * 0.45); g.lineTo(n * 0.3, n * 0.62); g.lineTo(n * 0.45, n * 0.35); g.lineTo(n * 0.62, n * 0.8); g.fill();
+        g.fillStyle = '#2B2A28'; g.font = `bold ${n * 0.3}px serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
+        g.fillText('清泉', n * 0.78, n * 0.52);
+        g.fillStyle = '#F5EFE6'; g.font = `${n * 0.08}px sans-serif`; g.fillText('山 の 水  500ml', n * 0.5, n * 0.09);
+      }) }), false, false);
+    return {
+      geo, cutY: 0.122,
+      surface: new THREE.MeshPhysicalMaterial({ color: '#BFE0F0', roughness: 0.06, metalness: 0, transparent: true, opacity: 0.5, clearcoat: 1, clearcoatRoughness: 0.05, emissive: '#1C2A3A', emissiveIntensity: 0.6, envMapIntensity: 1.8 }),
+      cap: new THREE.MeshStandardMaterial({
+        roughness: 0.05, transparent: true, opacity: 0.92, emissive: '#ffffff', emissiveIntensity: 0.55,
+        map: radialTex([[0, '#9FD0EA'], [0.82, '#6FA8C8'], [0.9, '#E8F1F8'], [0.97, '#FFFFFF'], [1, '#9FB7C9']]),
+        emissiveMap: radialTex([[0, '#2E5A74'], [0.85, '#4E6E7E'], [0.93, '#E8F1F8'], [1, '#9FB7C9']]),
+      }),
+      props: [label],
+      extras: [cap],
+      anim: { slide: 0.07, gap: 0.004, fall: 0.11, spin: 0.85, flutter: 0, gapLow: 0, tilt: 0, hop: 0.006 },
+      fx: 'water', weight: 1,
+    };
+  },
   paper: () => ({
     geo: new THREE.BoxGeometry(0.18, 0.22, 0.002).translate(0, 0.02 + 0.11, 0),
     surface: new THREE.MeshStandardMaterial({ color: '#F7F7F2', roughness: 0.9, side: THREE.DoubleSide }),
@@ -1958,41 +2295,6 @@ const TARGET_BUILD = {
     ], mat.darkWood)],
     anim: { slide: 0.07, gap: 0.006, fall: 0.07, spin: 0.5, flutter: 0.6, gapLow: 0.002, tilt: 0.04, hop: 0 },
     fx: 'paper', weight: 0,
-  }),
-  makiwara: () => ({
-    geo: new THREE.CylinderGeometry(0.04, 0.042, 0.26, 12, 4).translate(0, 0.015 + 0.13, 0),
-    surface: new THREE.MeshStandardMaterial({
-      roughness: 0.95,
-      map: canvasTex(128, (g, n) => { // rolled straw mat: fibres + two rope ties
-        g.fillStyle = `#${STRAW.getHexString()}`;
-        g.fillRect(0, 0, n, n);
-        for (let i = 0; i < 70; i++) {
-          g.fillStyle = Math.random() < 0.5 ? 'rgba(255,248,230,0.35)' : 'rgba(90,70,40,0.25)';
-          g.fillRect(Math.random() * n, 0, 1 + Math.random() * 2, n);
-        }
-        g.fillStyle = '#5C5650';
-        for (const y of [0.28, 0.72]) g.fillRect(0, y * n - 3, n, 6);
-      }),
-    }),
-    cap: new THREE.MeshStandardMaterial({
-      roughness: 0.9,
-      map: canvasTex(128, (g, n) => { // cross-section: tight straw spiral around a green bamboo core
-        g.fillStyle = `#${STRAW.getHexString()}`;
-        g.fillRect(0, 0, n, n);
-        g.strokeStyle = 'rgba(110,85,50,0.5)';
-        for (let r = n * 0.16; r < n * 0.5; r += 4) { g.beginPath(); g.arc(n / 2, n / 2, r, 0, Math.PI * 2); g.stroke(); }
-        g.fillStyle = '#C9D8C5';
-        g.beginPath(); g.arc(n / 2, n / 2, n * 0.14, 0, Math.PI * 2); g.fill();
-        g.fillStyle = '#6F8F6A';
-        g.beginPath(); g.arc(n / 2, n / 2, n * 0.09, 0, Math.PI * 2); g.fill();
-      }),
-    }),
-    props: [merged([
-      place(new THREE.CylinderGeometry(0.07, 0.08, 0.015, 10), 0, 0.0075, 0),
-      place(new THREE.CylinderGeometry(0.006, 0.006, 0.05, 6), 0, 0.03, 0),
-    ], mat.darkWood)],
-    anim: { slide: 0.11, gap: 0.012, fall: 0.1, spin: 1.2, flutter: 0, gapLow: 0.002, tilt: 0.05, hop: 0 },
-    fx: 'straw', weight: 1,
   }),
   iron: () => ({
     geo: new THREE.BoxGeometry(0.28, 0.04, 0.045).translate(0, 0.012 + 0.02, 0),
@@ -2064,9 +2366,10 @@ const targets = TARGETS.map((t) => {
   group.position.y = BLOCK_H;
   b.geo.computeBoundingBox();
   const box = b.geo.boundingBox;
-  const c = new THREE.Vector3((box.min.x + box.max.x) / 2, (box.min.y + box.max.y) / 2, 0).addScalar(1e-4); // off any vertex
+  const c = new THREE.Vector3((box.min.x + box.max.x) / 2, b.cutY ?? (box.min.y + box.max.y) / 2, 0).addScalar(1e-4); // off any vertex
+  const B = cutBasis(THREE.MathUtils.degToRad(t.tilt ?? 30));
   const whole = mesh(b.geo, b.surface);
-  const split = splitGeometry(b.geo, c);
+  const split = splitGeometry(b.geo, c, B);
   const halves = split.halves.map((h) => {
     const m = mesh(h.geo, [b.surface, b.cap]);
     m.position.copy(h.pivot);
@@ -2074,11 +2377,18 @@ const targets = TARGETS.map((t) => {
     group.add(m);
     return { mesh: m, home: h.pivot.clone(), side: h.side };
   });
+  // Extras (bottle cap, tomato calyx) ride with the upper piece; the whole mesh shows a copy.
+  const upper = halves.find((h) => h.side > 0);
+  for (const x of b.extras || []) {
+    whole.add(x.clone());
+    x.position.sub(upper.home);
+    upper.mesh.add(x);
+  }
   group.add(whole, ...b.props);
   group.visible = false;
   stage.add(group);
   return {
-    def: t, group, whole, halves, c, sTop: split.sTop, sBottom: split.sBottom, cap: b.cap,
+    def: t, group, whole, halves, c, B, sTop: split.sTop, sBottom: split.sBottom, cap: b.cap,
     capGlow: b.cap.emissiveIntensity ?? 0, anim: b.anim, fx: b.fx, weight: b.weight,
     height: box.max.y, halfW: Math.max(-box.min.x, box.max.x),
   };
@@ -2106,6 +2416,7 @@ function showStageTarget(i) {
 
 function animatePieces(target, k) {
   const a = target.anim;
+  const { N: CUT_N, D: CUT_D } = target.B;
   const e = easeOutCubic(k);
   for (const h of target.halves) {
     const m = h.mesh;
@@ -2134,9 +2445,35 @@ function impactFX(target, at, success) {
   if (fx === 'metal') burst(sparks, at, 36, 1.3, HEAT_COLORS, 0.5);
   if (fx === 'rock') { burst(drops, at, 30, 0.8, CHIP_COLORS, 0.8); burst(sparks, at, 14, 1.0, HEAT_COLORS, 0.35); }
   if (fx === 'ice') burst(drops, at, 36, 0.9, [ICE_COLOR, DROP_COLOR], 0.9);
-  if (fx === 'straw') burst(drops, at, 18, 0.5, STRAW_COLORS, 0.7);
+  if (fx === 'rope') burst(drops, at, 18, 0.45, STRAW_COLORS, 0.7);
+  if (fx === 'tomato') burst(drops, at, 22, 0.55, TOMATO_COLORS, 0.7);
+  if (fx === 'water') { burst(drops, at, 40, 0.9, WATER_COLORS, 1.1); spill = SPILL_TIME; }
   if (fx === 'paper') burst(drops, at, 8, 0.25, [ICE_COLOR], 0.6);
   burst(glints, at, 10, 0.4, GLINT_COLORS, 0.4);
+}
+
+// Bottle: after the cut, water keeps sheeting off the cut rim (in slow motion it hangs in the air).
+const SPILL_TIME = 1.4; // game seconds
+let spill = 0;
+let spillAcc = 0;
+function updateSpill(dt) {
+  if (spill <= 0) return;
+  spill -= dt;
+  const target = stageTarget;
+  const upper = target.halves.find((h) => h.side > 0);
+  if (!upper) return;
+  spillAcc += dt * 160 * Math.min(1, spill / SPILL_TIME + 0.3);
+  while (spillAcc >= 1) {
+    spillAcc -= 1;
+    const a = Math.random() * Math.PI * 2;
+    // a point on the cut rim of the lower piece (target space), then out to world
+    const ca = Math.cos(a), sa = Math.sin(a), out = 0.25 + Math.random() * 0.35;
+    tmpP.copy(target.c).addScaledVector(target.B.U, ca * 0.032).addScaledVector(CUT_Z, sa * 0.032);
+    target.group.localToWorld(tmpP);
+    tmpV.copy(target.B.U).multiplyScalar(ca * out).addScaledVector(CUT_Z, sa * out);
+    tmpV.y += 0.25 + Math.random() * 0.55;
+    drops.emit(tmpP, tmpV, WATER_COLORS[(Math.random() * 3) | 0], 0.6 + Math.random() * 0.5);
+  }
 }
 
 // Hitstop (true freeze, capped) -> then a camera shake that decays to zero.
@@ -2167,12 +2504,12 @@ function flash(color, opacity, ms) {
 
 /** World position of the point s along the slash line (target space). */
 function slashPoint(s, out) {
-  out.copy(CUT_U).multiplyScalar(s).add(slashRig.position);
+  out.copy(stageTarget.B.U).multiplyScalar(s).add(slashRig.position);
   return stage.localToWorld(out);
 }
 
 async function slashSuccess(target, sHigh) {
-  const sBlock = -target.c.y / CUT_U.y; // where the slash line meets the block
+  const sBlock = -target.c.y / target.B.U.y; // where the slash line meets the block
   const sEnd = Math.max(target.sBottom - 0.01, sBlock + 0.004);
   let hit = false;
   await tween(SLASH_TIME, (k) => {
@@ -2187,6 +2524,7 @@ async function slashSuccess(target, sHigh) {
       haptic(HAPTIC_CUT);
       audio.slice();
       if (target.weight >= 2) audio.boom(target.weight);
+      if (target.fx === 'water') audio.splash();
       flash(CLIMAX.slash, 0.75, 260);
       if (target.weight >= 3) setTimeout(() => flash(CLIMAX.accent, 0.3, 90), 40); // red: a few frames only
       impactFX(target, slashPoint(target.sTop, tmpP), true);
@@ -2196,7 +2534,7 @@ async function slashSuccess(target, sHigh) {
   impactFX(target, slashPoint(sEnd + 0.01, tmpP), true);
   if (target.fx === 'metal') tween(2.5, (k) => (target.cap.emissiveIntensity = lerp(target.capGlow, 0.5, k))); // cut cools
   const pieces = tween(0.9, (k) => animatePieces(target, k));
-  await waitReal(0.35); // hold the slow motion while the halves start to part
+  await waitReal(0.35 + (target.def.slowHold || 0)); // hold the slow motion while the halves start to part
   await tween(0.4, (k) => (timeScale = lerp(SLOWMO_SCALE, 1, k)), easeInOut, true);
   tween(0.3, (k) => (chopRig.position.y = lerp(sEnd, sHigh, k)), easeInOut);
   await pieces;
@@ -2216,11 +2554,11 @@ async function slashFail(target, sHigh) {
     // Blade kicks back up and glances off with a decaying wobble; the target only shudders.
     const up = Math.sin(Math.min(1, k * 1.8) * Math.PI * 0.5);
     chopRig.position.y = s0 + 0.14 * up;
-    slashRig.rotation.z = CUT_TILT - 0.3 * up * (1 - k * 0.5) + Math.sin(k * 32) * 0.08 * (1 - k);
+    slashRig.rotation.z = target.B.tilt - 0.3 * up * (1 - k * 0.5) + Math.sin(k * 32) * 0.08 * (1 - k);
     target.group.position.x = Math.sin(k * 60) * 0.004 * (1 - k);
   });
   target.group.position.x = 0;
-  slashRig.rotation.z = CUT_TILT;
+  slashRig.rotation.z = target.B.tilt;
 }
 
 /**
@@ -2267,7 +2605,7 @@ async function runTest(id, opts = {}) {
 
   cine.phase = 'windup';
   slashRig.position.copy(target.group.position).add(target.c);
-  slashRig.rotation.z = CUT_TILT;
+  slashRig.rotation.z = target.B.tilt;
   const sHigh = target.sTop + 0.14;
   chopRig.position.set(0, sHigh + 0.12, 0);
   chopRig.visible = true;
@@ -2305,6 +2643,7 @@ function showResult(idx, success) {
   const pct = Math.round(game.sharpness * 100);
   ui.resultTitle.textContent = success ? `${def.name}・一刀兩斷` : '彈開了';
   const lines = [`鋒利度 <b>${pct}%</b>・最高評價 <b>${RANKS[game.best + 1]}</b>`];
+  if (flow.mode === 'lab') lines.push(...labResultLines(def, success));
   if (success) {
     if (def.dull > 0) lines.push(`刃口略有磨損（${Math.round(before * 100)}% → ${pct}%）`);
     if (idx === TARGETS.length - 1) lines.push('連冰山都一刀兩斷，傳說中的名匠！');
@@ -2383,6 +2722,7 @@ function setResultButtons(isOrder, success) {
     ui.resultScore.classList.add('hidden');
     ui.resultHead.classList.add('hidden');
   }
+  ui.restartBtn.textContent = flow.mode === 'lab' ? '換素材' : '重來';
 }
 
 /** Capture the current scene and add the result text without keeping a drawing buffer alive. */
@@ -2549,17 +2889,24 @@ function releaseInput() {
 
 function setScreen(screen) {
   flow.screen = screen;
+  const menu = screen === 'title' || screen === 'order' || screen === 'lab';
   ui.title.classList.toggle('show', screen === 'title');
   ui.order.classList.toggle('show', screen === 'order');
-  document.body.classList.toggle('menu', screen === 'title' || screen === 'order');
-  if (screen === 'title' || screen === 'order') releaseInput();
+  ui.lab.classList.toggle('show', screen === 'lab');
+  document.body.classList.toggle('menu', menu);
+  if (menu) releaseInput();
 }
 
 function setFlowMode(mode) {
   flow.mode = mode;
   ui.targets.classList.toggle('hidden', mode === 'order');
   ui.orderHud.classList.toggle('hidden', mode !== 'order');
+  ui.labHud.classList.toggle('hidden', mode !== 'lab');
+  document.body.classList.toggle('lab', mode === 'lab');
+  document.body.classList.toggle('free', mode === 'free');
+  if (mode && mode !== 'lab' && knifeDef !== PLAIN_KNIFE) setKnifeMaterial(PLAIN_KNIFE); // orders / free use the gyuto
   refreshTargets();
+  refreshStoneButtons();
 }
 
 function updateOrderHud() {
@@ -2576,7 +2923,7 @@ function leaveResult() {
 }
 
 function showTitle() {
-  if (game.mode === 'test') return;
+  if (game.mode === 'test' || game.mode === 'measure') return;
   setScreen('title');
   setFlowMode(null);
   leaveResult();
@@ -2584,7 +2931,7 @@ function showTitle() {
 
 /** Show the next order card (difficulty = completed orders, clamped at the last target). */
 function startOrder() {
-  if (game.mode === 'test') return;
+  if (game.mode === 'test' || game.mode === 'measure') return;
   const no = flow.completed;
   const c = CUSTOMERS[no % CUSTOMERS.length];
   const targetIdx = Math.min(no, TARGETS.length - 1);
@@ -2607,7 +2954,7 @@ function startOrder() {
 
 /** Accept the order: dull edge, coarse stone, fresh stats, then sharpen. */
 function acceptOrder() {
-  if (game.mode === 'test' || game.mode === 'exit') return;
+  if (game.mode === 'test' || game.mode === 'exit' || game.mode === 'measure') return;
   if (flow.screen !== 'order' || !flow.order) startOrder();
   setFlowMode('order');
   seg.flash.fill(0);
@@ -2633,12 +2980,380 @@ function acceptOrder() {
 
 /** Free sharpening (the round-3 sandbox): target chips, free-mode result card. */
 function startFree() {
-  if (game.mode === 'test') return;
+  if (game.mode === 'test' || game.mode === 'measure') return;
   setFlowMode('free');
   setScreen('sharpen');
   leaveResult();
   if (game.mode === 'sharpen') showStageTarget(game.selected);
 }
+
+// ---------------------------------------------------------------------------
+// Sharpness tester (鋒利度測試儀): a bench prop on the table. Measuring swaps the knife into its clamp,
+// presses it onto the test thread until it parts, and reads the peak force off a log-scale dial.
+// Every reading lands on the progress chart (one column per grit), so each stone shows its gain.
+// ---------------------------------------------------------------------------
+const TESTER_POS = new THREE.Vector3(-0.27, 0, 0.19); // onTable-local, front left of the stone
+const TESTER_YAW = 0.32;
+const TESTER_LIFT = 0.075; // carriage height above contact when parked
+const CHART_COLS = ['磨前', ...STONES.map((s) => s.grit.slice(1))];
+const tester = buildTester(mat, GRADES);
+tester.group.position.copy(TESTER_POS);
+tester.group.rotation.y = TESTER_YAW;
+onTable.add(tester.group);
+const testerKnife = buildKnife();
+testerKnife.rotation.y = -Math.PI / 2; // edge along +z (toward the camera), spine up
+testerKnife.position.set(0, 0, -0.075); // the straight part of the edge (x = 0.075) sits on the thread
+tester.carriage.add(testerKnife);
+testerKnife.visible = false;
+tester.setCarriage(THREAD_Y + TESTER_LIFT);
+tester.needle.rotation.z = tester.peak.rotation.z = dialAngle(0);
+
+const meter = {
+  blend: 0, // camera blend to the tester view
+  busy: false,
+  points: [], // [{ col, g }] chart points this run (one per column, latest wins)
+  last: null, // last reading { g, grade, cuts, col, stone }
+  reveal: 1,
+  highlight: -1,
+};
+/** Threshold where this stone is "done" (磨完): its effective cap, minus a hair. */
+const stageDone = (i = game.stone) => game.sharpness >= effCap(STONES[i]) - 0.012;
+
+function formatGrams(g) {
+  return g >= FORCE.noCut ? '切不斷' : `${Math.round(g)}`;
+}
+
+function redrawChart() {
+  drawChart(ui.meterChart, { cols: CHART_COLS, points: meter.points, grades: GRADES, reveal: meter.reveal, highlight: meter.highlight });
+}
+
+async function runMeasure(opts = {}) {
+  if (meter.busy || game.mode !== 'sharpen' || flow.screen !== 'sharpen') return null;
+  if (stoneSwitching) await stoneSwap;
+  if (game.mode !== 'sharpen') return null;
+  meter.busy = true;
+  game.mode = 'measure';
+  flow.screen = 'measure';
+  releaseInput();
+  document.body.classList.add('measuring');
+  ui.testBtn.disabled = true;
+  ui.measureBtn.classList.remove('ready');
+
+  const raw = cutForce() * (0.975 + Math.random() * 0.05); // a real gauge never reads the same twice
+  const cuts = raw < FORCE.noCut;
+  const g = cuts ? Math.max(FORCE.sharp * 0.9, raw) : FORCE.noCut;
+  const grade = gradeOf(g);
+  const col = stats.dist === 0 && !meter.points.length ? 0 : game.stone + 1;
+  const done = stageDone();
+
+  // Knife moves from the stone into the clamp.
+  sharpKnife.visible = false;
+  testerKnife.visible = true;
+  tester.setThread(0);
+  tester.lamp.material.color.set('#3E4A61');
+  const parked = THREAD_Y + TESTER_LIFT;
+  tester.setCarriage(parked);
+  tester.needle.rotation.z = tester.peak.rotation.z = dialAngle(0);
+  const b0 = meter.blend;
+  if (opts.auto) narrate('先量一次：這把刀，現在有多鈍？', 2.6);
+  await tween(0.75 * (1 - b0) + 0.01, (k) => (meter.blend = lerp(b0, 1, k)), easeInOut);
+  await tween(0.4, (k) => tester.setCarriage(lerp(parked, THREAD_Y + 0.001, k)), easeOutCubic);
+  audio.touch();
+  ui.meterLive.classList.add('show');
+
+  // Press: force climbs (faster for a keen edge), the thread sags into a V, the needle follows.
+  const fMax = cuts ? g : FORCE.noCut * 1.1;
+  const pressT = cuts ? 0.55 + 1.35 * Math.sqrt(g / FORCE.noCut) : 2.1;
+  const sagOf = (f) => 0.0015 + 0.011 * Math.pow(Math.min(f, FORCE.noCut * 1.2) / FORCE.noCut, 0.7);
+  audio.strain(pressT, g / FORCE.noCut);
+  let peak = 0;
+  await tween(pressT, (k) => {
+    const f = fMax * k;
+    peak = Math.max(peak, f);
+    const sag = sagOf(f);
+    tester.setThread(sag);
+    tester.setCarriage(THREAD_Y - sag);
+    tester.needle.rotation.z = dialAngle(f);
+    tester.peak.rotation.z = dialAngle(peak);
+    setDom(ui.meterLive, 'text', `${Math.round(f)} g`);
+  }, (t) => t * t * (1.7 - 0.7 * t));
+
+  const sag0 = sagOf(fMax);
+  if (cuts) {
+    // Snap: the thread parts, both halves whip back; the main needle drops, the red peak needle stays.
+    audio.snap(grade.id);
+    haptic(grade.id === 'legend' ? [30, 40, 90] : 25);
+    testerKnife.localToWorld(tmpP.set(0.075, 0, 0));
+    burst(glints, tmpP, grade.id === 'legend' ? 18 : 8, 0.25, GLINT_COLORS, 0.5);
+    flash(grade.color, 0.22, 220);
+    setDom(ui.meterLive, 'text', `${Math.round(g)} g`);
+    tween(0.5, (k) => tester.setThread(sag0 * (1 - k), 1, 0.25 + k * 1.1), easeOutCubic);
+    tween(0.35, (k) => tester.setCarriage(THREAD_Y - sag0 - 0.018 * easeOutCubic(k)));
+    tween(0.6, (k) => (tester.needle.rotation.z = dialAngle(lerp(g, 0, easeOutBounce(k)))));
+  } else {
+    // No cut: the blade just crushes the thread; it springs back.
+    audio.clink();
+    haptic(HAPTIC_BOUNCE);
+    setDom(ui.meterLive, 'text', '切不斷');
+    tween(0.5, (k) => {
+      const sag = sag0 * (1 - easeOutBounce(k));
+      tester.setThread(sag);
+      tester.setCarriage(THREAD_Y - sag + 0.02 * k);
+    });
+    tween(0.6, (k) => (tester.needle.rotation.z = dialAngle(lerp(fMax, 0, easeOutCubic(k)))));
+  }
+  tester.lamp.material.color.set(grade.color);
+  await wait(0.45);
+
+  // Reading -> chart point; the panel slides up with the stamp.
+  const prev = meter.points.filter((p) => p.col !== col).slice(-1)[0];
+  meter.points = meter.points.filter((p) => p.col !== col).concat([{ col, g }]).sort((a, b) => a.col - b.col);
+  meter.highlight = meter.points.findIndex((p) => p.col === col);
+  meter.last = { g, grade: grade.id, gradeName: grade.name, cuts, col, stone: STONES[game.stone].id };
+  showMeterPanel(g, grade, cuts, prev, done);
+  audio.grade(GRADES.indexOf(grade));
+  ui.meterLive.classList.remove('show');
+  const isLast = meter.highlight === meter.points.length - 1;
+  meter.reveal = isLast && meter.points.length > 1 ? 0 : 1;
+  redrawChart();
+  if (meter.reveal < 1) await tween(0.7, (k) => { meter.reveal = k; redrawChart(); }, easeOutCubic);
+  onMeasured(meter.last, done);
+  return meter.last;
+}
+
+function showMeterPanel(g, grade, cuts, prev, done) {
+  ui.meterKicker.textContent = `鋒利度測試儀・${knifeDef.name}・${col2label(meter.last.col)}`;
+  ui.meterGrams.innerHTML = cuts ? `${Math.round(g)}<small>g</small>` : '切不斷';
+  ui.meterGrade.textContent = grade.name;
+  ui.meterGrade.style.color = grade.color;
+  ui.meterGrade.classList.remove('stamp');
+  void ui.meterGrade.offsetWidth;
+  ui.meterGrade.classList.add('stamp');
+  const notes = [];
+  if (!cuts) notes.push(`測試線壓扁了也沒斷（超過 ${FORCE.noCut} g）。`);
+  if (prev && prev.g > g) notes.push(`比上一階省力 <b>${Math.round((1 - g / prev.g) * 100)}%</b>（${formatGrams(prev.g)}${prev.g < FORCE.noCut ? ' g' : ''} → ${Math.round(g)} g）`);
+  const st = STONES[game.stone];
+  const next = STONES[game.stone + 1];
+  if (knifeDef.max < 1 && game.sharpness >= knifeDef.max - 0.012) notes.push(`這就是${knifeDef.short}的極限了。去試刀吧！`);
+  else if (done && next) notes.push(`${st.grit} 磨完了。下一顆：<b>${next.grit}</b>`);
+  else if (done && !next) notes.push('鏡面完成。這已經是傳說的領域。');
+  else notes.push(`${st.grit} 還能再利一點（極限 ${Math.round(cutForce(effCap(st), avgRust()))} g 左右）`);
+  ui.meterNote.innerHTML = notes.join('<br>');
+  ui.meter.classList.add('show');
+}
+const col2label = (col) => (col === 0 ? '磨前' : `${STONES[col - 1].grit}`);
+
+/** After a reading: unlock the next stone in the lab (a finished stage), record the best, set the next button. */
+function onMeasured(r, done) {
+  const next = game.stone + 1;
+  let showNext = done && next < STONES.length && !(knifeDef.max < 1 && game.sharpness >= knifeDef.max - 0.012);
+  if (flow.mode === 'lab') {
+    if (done && next < STONES.length && lab.stoneMax < next) {
+      lab.stoneMax = next;
+      refreshStoneButtons();
+      toast(`解鎖砥石 ${STONES[next].grit}`, 1.3);
+      audio.bell();
+    }
+    const id = knifeDef.id;
+    if (r.cuts && (!labSave.best[id] || r.g < labSave.best[id])) {
+      labSave.best[id] = Math.round(r.g);
+      saveLab();
+    }
+    if (!lab.midShown && GRADES.indexOf(gradeOf(r.g)) >= 2 && knifeDef.mid) {
+      lab.midShown = true;
+      narrate(knifeDef.mid, 3.4);
+    }
+    updateLabHud();
+  }
+  ui.meterNextBtn.classList.toggle('hidden', !showNext);
+  if (showNext) ui.meterNextBtn.textContent = `換 ${STONES[next].grit} →`;
+  meter.busy = false;
+}
+
+async function closeMeasure(toStone = -1) {
+  if (game.mode !== 'measure' || meter.busy) return;
+  meter.busy = true;
+  ui.meter.classList.remove('show');
+  ui.meterLive.classList.remove('show');
+  tween(0.35, (k) => tester.setCarriage(lerp(THREAD_Y - 0.02, THREAD_Y + TESTER_LIFT, k)), easeInOut);
+  const b0 = meter.blend;
+  await tween(0.7 * b0 + 0.01, (k) => (meter.blend = lerp(b0, 0, k)), easeInOut);
+  testerKnife.visible = false;
+  sharpKnife.visible = true;
+  tester.setThread(0);
+  tester.needle.rotation.z = dialAngle(0);
+  document.body.classList.remove('measuring');
+  ui.testBtn.disabled = false;
+  game.mode = 'sharpen';
+  flow.screen = 'sharpen';
+  meter.busy = false;
+  if (toStone >= 0) selectStone(toStone);
+}
+
+// ---------------------------------------------------------------------------
+// 素材工房 (material lab): pick a material → start dull → climb the grit ladder, testing after each
+// stone → cut the material's goal target (the PET bottle for the main metal line) → next material unlocks.
+// Progress (unlocked materials, best readings, cleared runs) persists in localStorage.
+// ---------------------------------------------------------------------------
+const LAB_KEY = 'knife.lab.v1';
+const labSave = { unlocked: 1, best: {}, cleared: {} };
+try {
+  const saved = JSON.parse(localStorage.getItem(LAB_KEY) || 'null');
+  if (saved && typeof saved === 'object') {
+    labSave.unlocked = clamp(Number(saved.unlocked) || 1, 1, MATERIALS.length);
+    if (saved.best && typeof saved.best === 'object') Object.assign(labSave.best, saved.best);
+    if (saved.cleared && typeof saved.cleared === 'object') Object.assign(labSave.cleared, saved.cleared);
+  }
+} catch (_) {}
+function saveLab() {
+  try { localStorage.setItem(LAB_KEY, JSON.stringify(labSave)); } catch (_) {}
+}
+const lab = { mat: -1, stoneMax: 0, midShown: false };
+const stoneMax = () => (flow.mode === 'lab' ? lab.stoneMax : STONES.length - 1);
+const goalIdx = (def) => Math.max(0, TARGETS.findIndex((t) => t.id === def.goal));
+
+function refreshStoneButtons() {
+  stoneBtns.forEach((b, i) => {
+    b.classList.toggle('on', i === game.stone);
+    b.classList.toggle('locked', i > stoneMax());
+    b.classList.toggle('done', flow.mode === 'lab' && i < lab.stoneMax);
+  });
+  updateCapMark();
+}
+function updateCapMark() {
+  const cap = effCap();
+  ui.capMark.style.display = cap >= 1 ? 'none' : '';
+  ui.capMark.style.left = `${cap * 100}%`;
+}
+
+function lockedStoneTap(i) {
+  audio.tick(false);
+  const st = STONES[game.stone];
+  if (i === lab.stoneMax + 1 && stageDone()) {
+    toast('先測一次，再換下一顆', 1.2);
+    runMeasure();
+  } else {
+    toast(`先把 ${STONES[lab.stoneMax].grit} 磨完並測試`, 1.4);
+  }
+  return st;
+}
+
+function updateLabHud() {
+  if (flow.mode !== 'lab' || lab.mat < 0) return;
+  const def = MATERIALS[lab.mat];
+  const r = meter.last;
+  const read = r ? `<b style="color:${GRADES.find((g) => g.id === r.grade).color}">${formatGrams(r.g)}${r.cuts ? ' g' : ''}</b>・${r.gradeName}` : '尚未測試';
+  ui.labHud.innerHTML = `<span class="mat">${def.name}</span><span>目標 ${TARGETS[goalIdx(def)].name}</span><span class="read">${read}</span>`;
+}
+
+function renderLabCards() {
+  ui.labCards.innerHTML = '';
+  MATERIALS.forEach((def, i) => {
+    const locked = i >= labSave.unlocked;
+    const b = document.createElement('button');
+    b.className = `mcard${i === 0 ? ' main' : ''}${locked ? ' locked' : ''}${labSave.cleared[def.id] ? ' cleared' : ''}`;
+    const cv = document.createElement('canvas');
+    drawMaterialIcon(cv, def, locked);
+    const best = labSave.best[def.id];
+    const limit = gradeOf(cutForce(def.max, 0));
+    const info = document.createElement('div');
+    info.innerHTML = locked
+      ? `<b>？？？</b><br><small>${i === labSave.unlocked ? `完成「${MATERIALS[i - 1].name}」解鎖` : '依序解鎖'}</small>`
+      : `<b>${def.name}</b><br><small>極限 <i style="color:${limit.color}">${limit.name}</i>・目標 ${TARGETS[goalIdx(def)].name}${best ? `<br>最佳 ${best} g` : ''}</small>`;
+    b.append(cv, info);
+    b.setAttribute('aria-label', locked ? `未解鎖素材（完成${MATERIALS[i - 1].name}解鎖）` : def.name);
+    b.addEventListener('click', () => {
+      audio.unlock();
+      if (locked) { audio.tick(false); toast(i === labSave.unlocked ? `完成「${MATERIALS[i - 1].name}」解鎖` : '依序解鎖', 1.2); return; }
+      audio.click();
+      startLab(i);
+    });
+    ui.labCards.appendChild(b);
+  });
+}
+
+function showLab() {
+  if (game.mode === 'test' || game.mode === 'measure') return;
+  renderLabCards();
+  setScreen('lab');
+  setFlowMode(null);
+  leaveResult();
+}
+
+/** Start a material run: fresh dull edge (rusty for the metal line), #120 only, chart cleared, a first reading. */
+function startLab(i) {
+  if (game.mode === 'test' || game.mode === 'exit' || game.mode === 'measure') return;
+  if (game.mode === 'result') leaveResult();
+  const def = MATERIALS[i];
+  lab.mat = i;
+  lab.stoneMax = 0;
+  lab.midShown = false;
+  setFlowMode('lab');
+  setKnifeMaterial(def);
+  seg.flash.fill(0);
+  setSharpness(def.start);
+  game.best = -1;
+  selectStone(0, true);
+  setAngle(START_ANGLE);
+  game.knifeX = game.knifeTargetX = 0;
+  game.hintTimer = 0;
+  game.pressure = game.speed = game.burr = game.hold = 0;
+  for (const s of stones) s.slurry01 = 0;
+  stats.dist = stats.angleDist = stats.pressDist = stats.strokes = 0;
+  stats.goalDist = -1;
+  meter.points = [];
+  meter.last = null;
+  refreshStoneButtons();
+  updateLabHud();
+  setScreen('sharpen');
+  if (game.mode === 'sharpen') showStageTarget(cutIdx());
+  narrate(def.intro, 4.2);
+  // The "before" reading: every run opens by showing how dull the knife is.
+  const run = lab.mat;
+  wait(2.2).then(() => { if (flow.mode === 'lab' && lab.mat === run && canSharpen() && stats.dist === 0 && !meter.points.length) runMeasure({ auto: true }); });
+}
+
+/** Lab result extras: the goal cut completes the material and unlocks the next one. */
+function labResultLines(def, success) {
+  const lines = [];
+  const m = MATERIALS[lab.mat];
+  if (!m) return lines;
+  const g = cutForce();
+  lines.push(`${m.name}・約 <b>${formatGrams(g)}${g < FORCE.noCut ? ' g' : ''}</b>（${gradeOf(g).name}）`);
+  if (success && def.id === m.goal) {
+    const first = !labSave.cleared[m.id];
+    labSave.cleared[m.id] = true;
+    const idx = MATERIALS.indexOf(m);
+    if (idx + 1 < MATERIALS.length && labSave.unlocked <= idx + 1) {
+      labSave.unlocked = idx + 2;
+      lines.push(`<b>解鎖新素材：${MATERIALS[idx + 1].name}</b>`);
+      wait(0.6).then(() => audio.bell());
+    } else if (first) {
+      lines.push('<b>完成！</b>');
+    }
+    saveLab();
+    narrate(m.done, 4.5);
+  } else if (!success && m.max < def.need) {
+    lines.push(`${m.short}最多到 ${Math.round(m.max * 100)}%，${def.name}需要 ${Math.round(def.need * 100)}%：這是素材的極限。`);
+  }
+  return lines;
+}
+
+// Narration: one line at a time, serif, centred low; fades out by itself.
+let narrTimer = 0;
+function narrate(text, seconds = 3) {
+  if (!text) return;
+  ui.narr.textContent = text;
+  ui.narr.classList.add('show');
+  clearTimeout(narrTimer);
+  narrTimer = setTimeout(() => ui.narr.classList.remove('show'), seconds * 1000);
+}
+
+onButton(ui.labBtn, () => showLab());
+onButton(ui.labBackBtn, () => showTitle());
+onButton(ui.measureBtn, () => { if (canSharpen()) runMeasure(); });
+onButton(ui.meterBackBtn, () => closeMeasure());
+onButton(ui.meterNextBtn, () => closeMeasure(Math.min(STONES.length - 1, game.stone + 1)));
 
 // ---------------------------------------------------------------------------
 // Letterbox: bars sized from the real viewport so the visible area is exactly LETTERBOX_ASPECT
@@ -2676,6 +3391,32 @@ const camB = new THREE.Vector3();
 const lookA = new THREE.Vector3();
 const lookB = new THREE.Vector3();
 
+// Tester close-up: framed in the upper part of a portrait screen / the left of a landscape one,
+// leaving room for the reading panel (bottom / right).
+const camC = new THREE.Vector3();
+const lookC = new THREE.Vector3();
+const TESTER_DIR = new THREE.Vector3(0.42, 0.5, 1).normalize();
+const camShift = new THREE.Vector3();
+function measureView(aspect, portrait, fov) {
+  tester.group.getWorldPosition(lookC);
+  lookC.y += 0.075;
+  const dir = camShift.copy(TESTER_DIR).applyAxisAngle(THREE.Object3D.DEFAULT_UP, TESTER_YAW);
+  tmpV.crossVectors(THREE.Object3D.DEFAULT_UP, dir).normalize(); // camera right: lean toward the dial
+  lookC.addScaledVector(tmpV, 0.035);
+  const d = fitDistance(0.19, 0.12, fov, aspect);
+  camC.copy(lookC).addScaledVector(dir, d);
+  const half = d * Math.tan(deg2rad(fov) / 2);
+  if (portrait || aspect < 1.6) { // shift the subject up: move the look point (and camera) down
+    const k = portrait ? 0.48 : 0.32;
+    lookC.y -= half * k;
+    camC.y -= half * k;
+  } else { // landscape: subject to the left, panel on the right
+    tmpV.crossVectors(THREE.Object3D.DEFAULT_UP, dir).normalize(); // camera right
+    lookC.addScaledVector(tmpV, half * aspect * 0.36);
+    camC.addScaledVector(tmpV, half * aspect * 0.36);
+  }
+}
+
 function updateCamera(t, realDt) {
   const aspect = camera.aspect;
   const portrait = aspect < 1;
@@ -2695,13 +3436,19 @@ function updateCamera(t, realDt) {
   camA.copy(lookA).addScaledVector(SHARPEN_DIR, fitDistance(portrait ? 0.26 : 0.46, portrait ? 0.16 : 0.26, fovA, aspect));
   const tg = stageTarget;
   lookB.set(stage.position.x, STAGE_TOP + BLOCK_H + tg.height * 0.5, stage.position.z);
-  camB.copy(lookB).addScaledVector(STAGE_DIR, Math.max((tg.halfW + 0.12) / tanH, (tg.height * 0.5 + 0.06) / tanVBand));
+  const margin = tg.def.frame ?? 0.12; // the bottle (first climax) is framed tighter
+  camB.copy(lookB).addScaledVector(STAGE_DIR, Math.max((tg.halfW + margin) / tanH, (tg.height * 0.5 + margin * 0.5) / tanVBand));
 
   camera.position.lerpVectors(camA, camB, camBlend);
   camera.position.x += Math.sin(t * 0.5) * 0.006;
   camera.position.y += Math.sin(t * 0.37 + 1) * 0.004;
   camera.position.z += Math.cos(t * 0.41) * 0.004;
   lookA.lerp(lookB, camBlend);
+  if (meter.blend > 0) {
+    measureView(aspect, portrait, fovA);
+    camera.position.lerp(camC, meter.blend);
+    lookA.lerp(lookC, meter.blend);
+  }
   camera.lookAt(lookA);
   if (shake > 0) {
     const a = shakeAmp * shake * shake; // decays large -> small, reaches exactly zero
@@ -2757,6 +3504,7 @@ function setSharpness(v) {
   seg.progress.fill(v);
   for (let i = 0; i < SEGS; i++) seg.level[i] = SEG_LEVELS.filter((l) => v >= l - 1e-6).length;
   game.sharpness = v;
+  game.mirrored = v >= 0.95;
   game.stage = seg.level[0];
   setKnifeFinish(v);
   game.unlocked = 0;
@@ -2823,11 +3571,13 @@ function frame() {
   if (game.mode === 'sharpen') updateSharpening(dt, simT);
   else game.pressure = damp(game.pressure, 0, 6, dt);
   updateGleam(gdt, simT);
+  updateRustOverlay();
   updateHUD();
   updateAtmosphere(simT);
   updateLetterbox();
 
   const floorY = camBlend > 0.5 ? STAGE_TOP + BLOCK_H : TABLE_TOP;
+  updateSpill(gdt);
   sparks.update(gdt, floorY);
   drops.update(gdt, floorY);
   glints.update(gdt, -10);
@@ -2928,6 +3678,51 @@ window.__knife = {
       halvesVisible: this.halvesVisible, lastResult: cine.lastResult, fps: window.__fps,
       screen: flow.screen, flowMode: flow.mode,
     };
+  },
+  /** 素材工房: open the material select screen / start a run (index or id). Returns lab(). */
+  showLab() { showLab(); return this.lab(); },
+  startLab(which = 0) {
+    if (flow.screen === 'title' || flow.screen === 'order') showLab();
+    const i = typeof which === 'number' ? which : MATERIALS.findIndex((m) => m.id === which);
+    startLab(i);
+    return this.lab();
+  },
+  /** Lab snapshot: material, stones unlocked, chart points, last reading, saved progress. */
+  lab() {
+    return {
+      material: lab.mat >= 0 ? MATERIALS[lab.mat].id : null, knife: knifeDef.id, stoneMax: lab.stoneMax,
+      stageDone: stageDone(), rust: Array.from(seg.rust), avgRust: avgRust(), force: cutForce(), grade: gradeOf(cutForce()).id,
+      points: meter.points.map((p) => ({ ...p })), last: meter.last, save: JSON.parse(JSON.stringify(labSave)),
+    };
+  },
+  /** Run the sharpness tester (resolves with the reading once the panel is up). close() returns to sharpening. */
+  measure(opts) { return runMeasure(opts); },
+  closeMeasure(next = false) { return closeMeasure(next ? Math.min(STONES.length - 1, game.stone + 1) : -1); },
+  get measuring() { return game.mode === 'measure'; },
+  materials: MATERIALS,
+  grades: GRADES,
+  force: FORCE,
+  /** Debug only: unlock every material (or n of them). */
+  unlockMaterials(n = MATERIALS.length) { labSave.unlocked = clamp(n, 1, MATERIALS.length); saveLab(); return labSave.unlocked; },
+  /** Debug only: grind as if `passes` ideal full passes were made on the current stone (no input needed). */
+  grind(passes = 1) {
+    const st = STONES[game.stone];
+    const cap = effCap(st);
+    for (let n = 0; n < passes * 40; n++) {
+      for (let i = 0; i < SEGS; i++) {
+        if (seg.rust[i] > 0) { seg.rust[i] = Math.max(0, seg.rust[i] - (RUST_PER_PASS * st.rust) / 40); if (seg.rust[i] < 0.04) seg.rust[i] = 0; }
+        const p = seg.progress[i], room = cap - p;
+        if (room <= 0) continue;
+        const ease = 0.3 + 0.7 * Math.min(1, (room / cap) * 3);
+        seg.progress[i] = Math.min(cap, p + (st.rate * knifeDef.rate * GAIN_PER_PASS / 40) * (1 - 0.55 * p) * ease * (1 - RUST_SLOW * seg.rust[i]));
+      }
+    }
+    stats.dist += passes;
+    rustDirty = true;
+    recomputeSharpness();
+    checkUnlocks();
+    setKnifeFinish(game.sharpness);
+    return game.sharpness;
   },
   /** Debug only. */
   setSharpness,
