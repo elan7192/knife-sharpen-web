@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <link rel="icon" href="data:," />
   <meta name="theme-color" content="#F3EBDD" />
-  <title>研刃 · 磨刀</title>
+  <title>磨刀遊戲（原型）</title>
   <style>
     /* Palettes: /workspace/game-art/02-palettes.md (day = default, dusk via body.dusk, climax for the test cut) */
     :root {
@@ -117,11 +117,64 @@
       position: fixed; inset: 0; display: none; align-items: center; justify-content: center; pointer-events: none;
     }
     #result.show { display: flex; }
-    #result .card { pointer-events: auto; text-align: center; padding: 18px 22px; max-width: min(88vw, 380px); background: rgba(11, 13, 18, 0.88); }
+    #result .card { pointer-events: auto; text-align: center; padding: 18px 20px; width: min(92vw, 380px); background: rgba(11, 13, 18, 0.88); }
     #resultTitle { font-size: 34px; letter-spacing: 0.2em; margin: 0 0 8px; color: var(--climax-ink); }
     #resultBody { font-size: 14px; line-height: 1.7; color: var(--climax-muted); margin-bottom: 14px; }
     #resultBody b { color: var(--climax-ink); }
-    #result .row { justify-content: center; }
+    #result .row { justify-content: center; flex-wrap: wrap; row-gap: 8px; }
+    #result .row button.hidden { display: none; }
+    /* Order-mode result: score + rank + breakdown */
+    #resultScore { display: flex; align-items: baseline; justify-content: center; gap: 14px; margin: 2px 0 10px; color: var(--climax-ink); }
+    #resultScore .rank { font-size: 56px; line-height: 1; font-weight: 700; letter-spacing: 0; }
+    #resultScore .rank.rS { color: #F4C95D; text-shadow: 0 0 18px rgba(244, 201, 93, 0.55); }
+    #resultScore .rank.rA { color: #E8F1F8; } #resultScore .rank.rB { color: #9FB7C9; } #resultScore .rank.rC { color: #808C9A; }
+    #resultScore .rank.rF { font-size: 34px; color: #9FB7C9; letter-spacing: 0.15em; }
+    #resultScore .pts { font-size: 26px; font-variant-numeric: tabular-nums; }
+    #resultScore .pts small { font-size: 14px; color: var(--climax-muted); margin-left: 2px; }
+    .brk { text-align: left; font-size: 13px; line-height: 1.5; margin: 0 0 10px; }
+    .brk div { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; border-bottom: 1px solid rgba(128, 140, 154, 0.25); }
+    .brk div span:first-child { color: var(--climax-muted); }
+    .brk div span:last-child { color: var(--climax-ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .brk div em { font-style: normal; color: var(--climax-muted); font-size: 11px; display: block; }
+
+    /* Title / order screens (full-screen; they block the canvas only while shown) */
+    .screen {
+      position: fixed; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center;
+      padding: calc(env(safe-area-inset-top) + 16px) calc(env(safe-area-inset-right) + 16px) calc(env(safe-area-inset-bottom) + 16px) calc(env(safe-area-inset-left) + 16px);
+      background: rgba(11, 13, 18, 0.58); color: var(--climax-ink); pointer-events: none; touch-action: none;
+    }
+    .screen.show { display: flex; pointer-events: auto; }
+    body.menu #hud, body.menu #bottom, body.menu #angleSlider, body.menu #stones { display: none; }
+    #title h1 { margin: 0; font-size: 52px; letter-spacing: 0.3em; text-indent: 0.3em; font-weight: 700; text-shadow: 0 4px 24px #000; white-space: nowrap; }
+    #title .sub { margin: 6px 0 2px; font-size: 13px; letter-spacing: 0.25em; color: var(--climax-muted); }
+    #title .tag { margin: 14px 0 34px; font-size: 16px; letter-spacing: 0.15em; color: var(--climax-ink); opacity: 0.9; }
+    .menu-btns { display: flex; flex-direction: column; gap: 12px; align-items: stretch; width: min(72vw, 260px); }
+    .screen button, #result .row button, #actions button { white-space: nowrap; }
+    .menu-btns button { font-size: 18px; letter-spacing: 0.2em; padding: 12px 18px; min-height: 52px; }
+    #title .foot { position: absolute; left: 0; right: 0; bottom: calc(env(safe-area-inset-bottom) + 10px); text-align: center; font-size: 11px; color: var(--climax-muted); }
+    #order .card { background: rgba(11, 13, 18, 0.9); width: min(92vw, 380px); padding: 18px 20px; }
+    #order .kicker { font-size: 12px; letter-spacing: 0.3em; color: var(--climax-muted); }
+    #order h2 { margin: 4px 0 2px; font-size: 26px; letter-spacing: 0.1em; color: var(--climax-ink); }
+    #order .from { font-size: 13px; color: var(--climax-muted); }
+    #order .quote { margin: 12px 0; font-size: 15px; line-height: 1.6; color: var(--climax-ink); }
+    #order dl { margin: 0 0 16px; display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; font-size: 14px; }
+    #order dt { color: var(--climax-muted); white-space: nowrap; }
+    #order dd { margin: 0; color: var(--climax-ink); }
+    #order dd b { color: #F4C95D; font-size: 18px; }
+    #order .row { justify-content: center; }
+    #order .row button { font-size: 17px; letter-spacing: 0.12em; padding: 12px 20px; }
+    @media (max-height: 520px) {
+      #resultTitle { font-size: 24px; margin-bottom: 4px; }
+      #resultScore { margin-bottom: 4px; } #resultScore .rank { font-size: 40px; }
+      .brk { font-size: 12px; margin-bottom: 6px; } .brk div { padding: 1px 0; } .brk div em { display: inline; margin-left: 6px; }
+      #title h1 { font-size: 40px; } #title .tag { margin: 8px 0 16px; }
+      .menu-btns { flex-direction: row; width: auto; } #order .quote { margin: 6px 0; } #order dl { margin-bottom: 8px; }
+    }
+    #orderHud { font-size: 14px; padding: 6px 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #orderHud b { color: var(--accent); }
+    #orderHud.ready b { color: var(--green); }
+    #actions { display: flex; gap: 10px; align-items: center; }
+    #menuBtn { min-width: 0; padding: 12px 14px; font-size: 15px; letter-spacing: 0.1em; }
 
     #toast {
       position: fixed; left: 50%; top: 42%; transform: translate(-50%, -50%); pointer-events: none;
@@ -186,6 +239,7 @@
   <div id="app"></div>
 
   <div id="hud">
+    <div id="orderHud" class="card hidden"></div>
     <div class="card">
       <div class="row">
         <span class="label">鋒利度</span>
@@ -233,19 +287,54 @@
   <div id="result">
     <div class="card">
       <h2 id="resultTitle"></h2>
+      <div id="resultScore" class="hidden"></div>
       <div id="resultBody"></div>
       <div class="row">
         <button id="againBtn" class="secondary">繼續磨</button>
         <button id="nextBtn">再切一次</button>
         <button id="restartBtn" class="secondary">重來</button>
+        <button id="retryBtn" class="hidden">再磨一下</button>
+        <button id="nextOrderBtn" class="hidden">下一個委託</button>
+        <button id="titleBtn" class="secondary hidden">回標題</button>
       </div>
     </div>
   </div>
 
   <div id="bottom">
     <div id="targets" aria-label="試刀目標"></div>
-    <button id="testBtn">試刀</button>
+    <div id="actions">
+      <button id="menuBtn" class="secondary" aria-label="回標題畫面">標題</button>
+      <button id="testBtn">試刀</button>
+    </div>
     <div id="credit">場景與刀皆為程式生成・無外部素材</div>
+  </div>
+
+  <div id="title" class="screen show" aria-label="標題畫面">
+    <h1>磨刀</h1>
+    <div class="sub">原型・暫定名稱</div>
+    <div class="tag">慢慢磨，一刀切開。</div>
+    <div class="menu-btns">
+      <button id="startBtn">開始</button>
+      <button id="freeBtn" class="secondary">自由磨刀</button>
+    </div>
+    <div class="foot">場景與刀皆為程式生成・無外部素材</div>
+  </div>
+
+  <div id="order" class="screen" aria-label="委託">
+    <div class="card">
+      <div class="kicker" id="orderNo">委託</div>
+      <h2 id="orderName"></h2>
+      <div class="from" id="orderFrom"></div>
+      <div class="quote" id="orderLine"></div>
+      <dl>
+        <dt>刀</dt><dd id="orderKnife"></dd>
+        <dt>試刀要求</dt><dd id="orderTarget"></dd>
+      </dl>
+      <div class="row">
+        <button id="orderBackBtn" class="secondary">回標題</button>
+        <button id="acceptBtn">接下委託</button>
+      </div>
+    </div>
   </div>
 
   <script type="module" src="./main.js"></script>

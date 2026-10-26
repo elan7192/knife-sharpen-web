@@ -51,7 +51,36 @@ const TARGETS = [
   { id: 'boulder', name: '巨石', need: 0.75, hitstop: 0.11, dull: 0.04 },
   { id: 'iceberg', name: '冰山', need: 0.92, hitstop: 0.12, dull: 0.03 },
 ];
-const RANKS = ['鈍刀', '入門', '見習', '利刃', '名刀', '神品']; // index = best target cut + 1
+const RANKS = ['鈍刀', '入門', '見習', '利刃', '名刀', '神品']; // index = best target cut + 1 (free mode)
+
+// Order (委託) mode. Order n asks for TARGETS[min(n, last)] (difficulty rises per completed order,
+// then stays at the iceberg); the customer cycles through this list. The knife is always the gyuto.
+const CUSTOMERS = [
+  { name: '王老闆', from: '老街豆腐店', knife: '天天切豆腐、刃口鈍掉的牛刀', line: '豆腐都切得坑坑巴巴的，麻煩你了。' },
+  { name: '陳師傅', from: '竹林工坊', knife: '劈竹子劈到有點捲刃的牛刀', line: '慢慢磨就好，不急。' },
+  { name: '林師傅', from: '打鐵鋪', knife: '剛打好、還沒開鋒的牛刀', line: '我只管打鐵，磨刀就交給你了。' },
+  { name: '張大哥', from: '山腳石材行', knife: '刃口崩了一點的牛刀', line: '聽說磨得夠利，連石頭都切得開？' },
+  { name: '小雪', from: '冰雕工作室', knife: '收了一整年、鈍掉的牛刀', line: '希望它能像冰一樣俐落。' },
+  { name: '阿明', from: '漁港', knife: '沾了海水、有點鈍的牛刀', line: '剛收完漁獲，刀鈍到切不動魚。' },
+];
+// Order scoring (deterministic, 0–100). Each part is a 0..1 ratio times its weight; weights sum to 100.
+//   margin     final sharpness over the requirement; full at need + min(marginFull, marginCeil - need)
+//   angle      share of grinding distance with the angle inside BAND_LO–BAND_HI
+//   pressure   share of grinding distance with pressure in the green zone PRESS_LO–PRESS_HI
+//   efficiency grinding distance until the margin goal was first reached (or in total, if never) vs. par
+//              (= max(parMin, ideal full passes from orderStart to the goal × parSlack)); 1 when within par.
+//              Polishing past the goal is never penalised.
+// A failed cut has no score: rank 失敗 and the player can keep sharpening the same order.
+const SCORE = {
+  weights: { margin: 40, angle: 25, pressure: 20, efficiency: 15 },
+  marginFull: 0.1,
+  marginCeil: 0.98,
+  parSlack: 2,
+  parMin: 2, // full passes; one pass = the whole edge across the stone once
+  orderStart: 0.08, // every order starts with a dull edge at this sharpness, on the coarse stone
+};
+const RANK_TABLE = [{ rank: 'S', min: 90 }, { rank: 'A', min: 75 }, { rank: 'B', min: 55 }, { rank: 'C', min: 0 }];
+const RANK_LINES = { S: '完美！這把刀比新的還利。', A: '好利！謝謝你。', B: '不錯，可以用了。', C: '切得開，下次再磨細一點吧。' };
 const HITSTOP_MAX = 0.12; // seconds; research: hitstop must be capped
 const FAIL_HITSTOP = 0.07;
 const SLOWMO_SCALE = 0.15; // time scale during the slash
@@ -1061,6 +1090,11 @@ const ui = {
   slider: $('angleSlider'), hud: $('hud'), bottom: $('bottom'),
   stones: $('stones'), targets: $('targets'), ticks: $('sharpTicks'), capMark: $('capMark'),
   bars: [$('cineTop'), $('cineBottom'), $('cineLeft'), $('cineRight')],
+  title: $('title'), order: $('order'), orderHud: $('orderHud'), menuBtn: $('menuBtn'),
+  startBtn: $('startBtn'), freeBtn: $('freeBtn'), acceptBtn: $('acceptBtn'), orderBackBtn: $('orderBackBtn'),
+  orderNo: $('orderNo'), orderName: $('orderName'), orderFrom: $('orderFrom'), orderLine: $('orderLine'),
+  orderKnife: $('orderKnife'), orderTarget: $('orderTarget'),
+  resultScore: $('resultScore'), retryBtn: $('retryBtn'), nextOrderBtn: $('nextOrderBtn'), titleBtn: $('titleBtn'),
 };
 for (const t of TARGETS) {
   if (t.need <= 0) continue;
@@ -1153,6 +1187,17 @@ const cine = {
   lastHitstopMs: 0,
   lastResult: null,
 };
+// Game flow: title -> order -> sharpen -> cut -> result (order mode), or title -> sharpen (free mode).
+const flow = {
+  screen: 'title', // title | order | sharpen | cut | result
+  mode: null, // null (on the title) | 'order' | 'free'
+  completed: 0, // successful orders; sets the next order's difficulty
+  order: null, // { no, customer, from, knife, line, targetIdx, target, targetName, need, done }
+  ready: false, // order mode: sharpness has reached the order's requirement
+  result: null, // last order result { success, score, rank, parts }
+};
+// Per-order grinding stats (edge units travelled while grinding; 1 = one full pass along the edge)
+const stats = { dist: 0, angleDist: 0, pressDist: 0, strokes: 0, goalDist: -1 }; // goalDist: dist when the margin goal was reached
 const seg = {
   progress: new Float32Array(SEGS),
   level: new Uint8Array(SEGS),
@@ -1186,6 +1231,8 @@ const pressureOK = () => game.pressure >= PRESS_LO && game.pressure <= PRESS_HI;
 function setAngle(a) {
   game.angle = clamp(a, ANGLE_MIN, ANGLE_MAX);
 }
+/** Player input reaches the knife only on the sharpening screen (not behind the title / order card). */
+const canSharpen = () => game.mode === 'sharpen' && flow.screen === 'sharpen';
 
 // ---------------------------------------------------------------------------
 // Input (pointer events; touch-action: none on the canvas and controls)
@@ -1202,7 +1249,7 @@ function stonePixelsPerUnit() {
 canvas.addEventListener('pointerdown', (e) => {
   e.preventDefault();
   if (e.pointerType === 'mouse' || audio.ctx) audio.unlock();
-  if (game.mode !== 'sharpen') return;
+  if (!canSharpen()) return;
   try { canvas.setPointerCapture(e.pointerId); } catch { /* pointer already gone */ }
   if (!drag) {
     drag = { id: e.pointerId, x: e.clientX, y: e.clientY, ppu: stonePixelsPerUnit() };
@@ -1245,10 +1292,10 @@ canvas.addEventListener('lostpointercapture', endPointer);
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
-  if (game.mode === 'sharpen') setAngle(game.angle - Math.sign(e.deltaY) * 0.5);
+  if (canSharpen()) setAngle(game.angle - Math.sign(e.deltaY) * 0.5);
 }, { passive: false });
 window.addEventListener('keydown', (e) => {
-  if (game.mode !== 'sharpen') return;
+  if (!canSharpen()) return;
   if (e.key === 'ArrowUp') setAngle(game.angle + 0.5);
   if (e.key === 'ArrowDown') setAngle(game.angle - 0.5);
 });
@@ -1272,7 +1319,7 @@ function sliderSet(e) {
 ui.slider.addEventListener('pointerdown', (e) => {
   e.preventDefault();
   if (e.pointerType === 'mouse' || audio.ctx) audio.unlock();
-  if (game.mode !== 'sharpen') return;
+  if (!canSharpen()) return;
   sliderPointer = e.pointerId;
   try { ui.slider.setPointerCapture(e.pointerId); } catch { /* ignore */ }
   audio.tick(false);
@@ -1292,14 +1339,22 @@ function onButton(el, fn) {
     fn();
   });
 }
-onButton(ui.testBtn, () => { if (game.mode === 'sharpen') runTest(TARGETS[game.selected].id); });
+onButton(ui.testBtn, () => { if (canSharpen()) runTest(TARGETS[cutIdx()].id); });
 onButton(ui.againBtn, () => backToSharpen(false));
 onButton(ui.restartBtn, () => backToSharpen(true));
 onButton(ui.nextBtn, () => { if (game.mode === 'result') runTest(TARGETS[game.selected].id); });
-stoneBtns.forEach((b, i) => b.addEventListener('click', () => { audio.unlock(); selectStone(i); }));
+onButton(ui.startBtn, () => startOrder());
+onButton(ui.freeBtn, () => startFree());
+onButton(ui.acceptBtn, () => acceptOrder());
+onButton(ui.orderBackBtn, () => showTitle());
+onButton(ui.menuBtn, () => showTitle());
+onButton(ui.retryBtn, () => backToSharpen(false));
+onButton(ui.nextOrderBtn, () => startOrder());
+onButton(ui.titleBtn, () => showTitle());
+stoneBtns.forEach((b, i) => b.addEventListener('click', () => { audio.unlock(); if (flow.screen === 'sharpen') selectStone(i); }));
 targetBtns.forEach((b, i) => b.addEventListener('click', () => {
   audio.unlock();
-  if (game.mode !== 'sharpen') return;
+  if (!canSharpen() || flow.mode === 'order') return;
   if (i > game.unlocked) {
     audio.tick(false);
     toast(`需要鋒利度 ${Math.round(TARGETS[i].need * 100)}%`, 1.1);
@@ -1370,8 +1425,11 @@ function refreshTargets() {
     b.lastChild.textContent = locked ? `🔒${Math.round(t.need * 100)}%` : short ? `不足 ${Math.round(t.need * 100)}%` : i <= game.best ? '✓ 已斬' : t.need > 0 ? `${Math.round(t.need * 100)}%` : '入門';
     b.setAttribute('aria-label', locked ? `${t.name}（需要鋒利度 ${Math.round(t.need * 100)}%）` : short ? `${t.name}（目前鋒利度不足，需要 ${Math.round(t.need * 100)}%）` : t.name);
   });
-  ui.testBtn.textContent = `試刀・${TARGETS[game.selected].name}`;
+  ui.testBtn.textContent = `試刀・${TARGETS[cutIdx()].name}`;
 }
+
+/** Target the test-cut button cuts: the order's target in order mode, otherwise the selected chip. */
+const cutIdx = () => (flow.mode === 'order' && flow.order ? flow.order.targetIdx : game.selected);
 
 function selectTarget(i) {
   game.selected = clamp(i, 0, game.unlocked);
@@ -1379,8 +1437,8 @@ function selectTarget(i) {
   showStageTarget(game.selected);
 }
 
-/** Sticky unlocks: crossing a threshold rings the bell and selects the new target. */
-function checkUnlocks(quiet = false) {
+/** Sticky unlocks: crossing a threshold rings the bell and selects the new target (free mode; silent in order mode). */
+function checkUnlocks(quiet = flow.mode === 'order') {
   let changed = false;
   while (game.unlocked < TARGETS.length - 1 && game.sharpness >= TARGETS[game.unlocked + 1].need - 1e-6) {
     game.unlocked++;
@@ -1394,7 +1452,10 @@ function checkUnlocks(quiet = false) {
       b.classList.add('fresh');
     }
   }
-  if (changed) selectTarget(game.unlocked);
+  if (changed) {
+    if (flow.mode === 'order') refreshTargets(); // the order fixes the target; chips are hidden
+    else selectTarget(game.unlocked);
+  }
   // Refresh the labels when an unlocked target drops below / climbs back over its requirement.
   let mask = 0;
   for (let i = 1; i <= game.unlocked; i++) if (game.sharpness < TARGETS[i].need - 1e-6) mask |= 1 << i;
@@ -1454,6 +1515,9 @@ function updateSharpening(dt, t) {
   const stoneX = game.knifeX * 0.75; // contact point in stone-local x
   if (grinding && du > 0) {
     const eff = angleEfficiency(game.angle) * pressureEfficiency(game.pressure) * st.rate;
+    stats.dist += du;
+    if (game.angle >= BAND_LO && game.angle <= BAND_HI) stats.angleDist += du;
+    if (pressureOK()) stats.pressDist += du;
     for (let i = 0; i < SEGS; i++) {
       const w = segWeight(i, game.edgeU);
       if (w <= 0) continue;
@@ -1484,6 +1548,18 @@ function updateSharpening(dt, t) {
   }
   recomputeSharpness();
   checkUnlocks();
+  if (flow.mode === 'order' && flow.order) {
+    if (stats.goalDist < 0 && game.sharpness >= flow.order.goal - 1e-6) stats.goalDist = stats.dist;
+    const ready = game.sharpness >= flow.order.need - 1e-6;
+    if (ready !== flow.ready) {
+      flow.ready = ready;
+      updateOrderHud();
+      if (ready && flow.screen === 'sharpen') {
+        audio.bell();
+        toast('已達委託要求・可以試刀了', 1.5);
+      }
+    }
+  }
 
   // Angle band entry feedback, and a soft tick per degree while steering outside it
   const inBand = angleState() === 'good';
@@ -1510,6 +1586,7 @@ function updateSharpening(dt, t) {
   if (grinding) {
     const dirX = Math.sign(v) || 1;
     const slurry = SLURRY_COLORS[game.stone];
+    if (dirX !== game.lastDir) stats.strokes++; // one stroke per push / pull
     if (game.lastDir && dirX !== game.lastDir && game.speed > 0.15 && st.fx === 'slurry') {
       burst(drops, contact, 4, 0.35, slurry, 0.45); // splash at the stroke reversal
     }
@@ -2002,6 +2079,8 @@ async function slashFail(target, sHigh) {
  * opts.fail forces the bounce. Resolves with { id, success } (null if a cut is already running).
  */
 async function runTest(id, opts = {}) {
+  // A result-card exit is still unwinding the prior cinematic; never overlap cuts.
+  if (game.mode === 'test' || game.mode === 'exit') return null;
   if (game.mode !== 'sharpen' && game.mode !== 'result') return null;
   const idx = TARGETS.findIndex((t) => t.id === id);
   if (idx < 0) return null;
@@ -2014,6 +2093,7 @@ async function runTest(id, opts = {}) {
   const success = !opts.fail && game.sharpness >= def.need - 1e-6;
   ui.result.classList.remove('show');
   game.mode = 'test';
+  flow.screen = 'cut';
   cine.phase = 'enter';
   cine.target = id;
   cine.lastHitstopMs = 0;
@@ -2059,10 +2139,18 @@ function showResult(idx, success) {
   const def = TARGETS[idx];
   game.mode = 'result';
   cine.phase = 'result';
+  flow.screen = 'result';
   const before = game.sharpness;
   if (success) {
     game.best = Math.max(game.best, idx);
     dullEdge(def.dull);
+  }
+  const isOrder = flow.mode === 'order' && flow.order && idx === flow.order.targetIdx;
+  setResultButtons(isOrder, success);
+  if (isOrder) {
+    showOrderResult(def, success, before);
+    cine.lastResult = { id: def.id, success, sharpness: game.sharpness, hitstopMs: cine.lastHitstopMs, score: flow.result.score, rank: flow.result.rank };
+    return cine.lastResult;
   }
   const pct = Math.round(game.sharpness * 100);
   ui.resultTitle.textContent = success ? `${def.name}・一刀兩斷` : '彈開了';
@@ -2090,8 +2178,105 @@ function showResult(idx, success) {
   return cine.lastResult;
 }
 
+/** Order mode: score the cut, then fill the result card (rank, score, breakdown, customer's line). */
+function showOrderResult(def, success, sharp) {
+  const o = flow.order;
+  const r = scoreOrder(sharp, o.need, success);
+  flow.result = r;
+  if (success && !o.done) {
+    flow.completed++;
+    o.done = true;
+  }
+  const pct = (v) => `${Math.round(v * 100)}%`;
+  const P_ = r.parts;
+  ui.resultTitle.textContent = success ? `${def.name}・一刀兩斷` : '彈開了';
+  ui.resultScore.innerHTML = success
+    ? `<span class="rank r${r.rank}">${r.rank}</span><span class="pts">${r.score}<small>分</small></span>`
+    : '<span class="rank rF">失敗</span>';
+  ui.resultScore.classList.remove('hidden');
+  const row = (label, note, value, part) =>
+    `<div><span>${label}<em>${note}</em></span><span>${value}${part ? `・${part.pts}/${part.max}` : ''}</span></div>`;
+  const brk = [
+    row('鋒利度', `要求 ${pct(o.need)}`, pct(sharp), success ? P_.margin : null),
+    row('角度準確', `${BAND_LO}°–${BAND_HI}° 內的比例`, stats.dist > 0 ? pct(P_.angle.ratio) : '—', success ? P_.angle : null),
+    row('壓力適中', '綠區內的比例', stats.dist > 0 ? pct(P_.pressure.ratio) : '—', success ? P_.pressure : null),
+    row('效率', `推拉 ${stats.strokes} 次・${P_.efficiency.par.toFixed(1)} 趟內磨到 ${pct(o.goal)} 得滿分`, `${P_.efficiency.used.toFixed(1)} 趟`, success ? P_.efficiency : null),
+  ];
+  const lines = [];
+  if (success) {
+    lines.push(`${o.from} ${o.customer}：「${RANK_LINES[r.rank]}」`);
+  } else {
+    lines.push('沒關係，再磨一下就好。');
+    lines.push(`${def.name} 需要 <b>${pct(def.need)}</b>，目前 ${pct(sharp)}`);
+    const st = STONES[game.stone];
+    const need = STONES.find((x) => x.cap >= def.need);
+    if (need && st.cap < def.need) lines.push(`${st.name}砥最多 ${pct(st.cap)}，換「${need.name}」砥（${need.grit}）`);
+  }
+  ui.resultBody.innerHTML = `<div class="brk">${brk.join('')}</div>${lines.join('<br>')}`;
+  ui.result.classList.add('show');
+}
+
+/** Free mode keeps the round-3 buttons; order mode shows 再磨一下 (fail) / 下一個委託 (success) + 回標題. */
+function setResultButtons(isOrder, success) {
+  ui.againBtn.classList.toggle('hidden', isOrder);
+  ui.nextBtn.classList.toggle('hidden', isOrder);
+  ui.restartBtn.classList.toggle('hidden', isOrder);
+  ui.retryBtn.classList.toggle('hidden', !isOrder || success);
+  ui.nextOrderBtn.classList.toggle('hidden', !isOrder || !success);
+  ui.titleBtn.classList.toggle('hidden', !isOrder);
+  if (!isOrder) ui.resultScore.classList.add('hidden');
+}
+
+/** Ideal full passes (perfect angle and pressure, best stone each pass) to raise the edge from -> to. */
+function idealPasses(from, to) {
+  let p = from, n = 0;
+  while (p < to - 1e-6 && n < 2000) {
+    let gain = 0;
+    for (const st of STONES) {
+      const room = st.cap - p;
+      if (room <= 0) continue;
+      const ease = 0.3 + 0.7 * Math.min(1, (room / st.cap) * 3);
+      gain = Math.max(gain, Math.min(st.cap, p + st.rate * GAIN_PER_PASS * (1 - 0.55 * p) * ease) - p);
+    }
+    if (gain <= 0) break;
+    if (p + gain >= to) return n + (to - p) / gain;
+    p += gain;
+    n++;
+  }
+  return n;
+}
+
+/** Deterministic order score from the final sharpness and this order's grinding stats (see SCORE). */
+const marginSpan = (need) => Math.max(0.01, Math.min(SCORE.marginFull, SCORE.marginCeil - need));
+function scoreOrder(sharp, need, success) {
+  const W = SCORE.weights;
+  const span = marginSpan(need);
+  const par = Math.max(SCORE.parMin, idealPasses(SCORE.orderStart, need + span) * SCORE.parSlack);
+  const hasDist = Number.isFinite(stats.dist) && stats.dist > 0;
+  const used = hasDist && Number.isFinite(stats.goalDist) && stats.goalDist >= 0 ? stats.goalDist : hasDist ? stats.dist : 0;
+  const ratio = {
+    margin: clamp((sharp - need) / span, 0, 1),
+    angle: hasDist ? clamp(stats.angleDist / stats.dist, 0, 1) : 0,
+    pressure: hasDist ? clamp(stats.pressDist / stats.dist, 0, 1) : 0,
+    efficiency: hasDist ? clamp(used <= par ? 1 : par / used, 0, 1) : 0,
+  };
+  const parts = {};
+  let score = 0;
+  for (const k of Object.keys(W)) {
+    const pts = Math.round(ratio[k] * W[k]);
+    parts[k] = { ratio: ratio[k], pts, max: W[k] };
+    score += pts;
+  }
+  parts.efficiency.par = par;
+  parts.efficiency.used = used;
+  if (!success) return { success, score: null, rank: '失敗', parts };
+  const rank = RANK_TABLE.find((r) => score >= r.min).rank;
+  return { success, score, rank, parts };
+}
+
 async function backToSharpen(reset) {
   if (game.mode !== 'result') return;
+  if (flow.screen === 'result') flow.screen = 'sharpen';
   game.mode = 'exit';
   cine.phase = 'exit';
   ui.result.classList.remove('show');
@@ -2128,10 +2313,108 @@ async function backToSharpen(reset) {
   ui.slider.classList.remove('hidden');
   ui.testBtn.disabled = false;
   refreshTargets();
-  showStageTarget(game.selected);
+  showStageTarget(cutIdx());
   cine.target = null;
   cine.phase = 'idle';
   game.mode = 'sharpen';
+}
+
+// ---------------------------------------------------------------------------
+// Flow screens: title -> order card -> sharpen -> cut -> result
+// ---------------------------------------------------------------------------
+function releaseInput() {
+  drag = second = null;
+  sliderPointer = null;
+  audio.setGrind(0);
+}
+
+function setScreen(screen) {
+  flow.screen = screen;
+  ui.title.classList.toggle('show', screen === 'title');
+  ui.order.classList.toggle('show', screen === 'order');
+  document.body.classList.toggle('menu', screen === 'title' || screen === 'order');
+  if (screen === 'title' || screen === 'order') releaseInput();
+}
+
+function setFlowMode(mode) {
+  flow.mode = mode;
+  ui.targets.classList.toggle('hidden', mode === 'order');
+  ui.orderHud.classList.toggle('hidden', mode !== 'order');
+  refreshTargets();
+}
+
+function updateOrderHud() {
+  const o = flow.order;
+  if (!o) return;
+  ui.orderHud.innerHTML = `委託・${o.customer}：切開 <b>${o.targetName}</b>（${flow.ready ? '已達要求 ✓' : `需要 ${Math.round(o.need * 100)}%`}）`;
+  ui.orderHud.classList.toggle('ready', flow.ready);
+}
+
+/** Leave a finished cut (if any) in the background while a menu screen is up. */
+function leaveResult() {
+  ui.result.classList.remove('show');
+  if (game.mode === 'result') backToSharpen(false);
+}
+
+function showTitle() {
+  if (game.mode === 'test') return;
+  setScreen('title');
+  setFlowMode(null);
+  leaveResult();
+}
+
+/** Show the next order card (difficulty = completed orders, clamped at the last target). */
+function startOrder() {
+  if (game.mode === 'test') return;
+  const no = flow.completed;
+  const c = CUSTOMERS[no % CUSTOMERS.length];
+  const targetIdx = Math.min(no, TARGETS.length - 1);
+  const t = TARGETS[targetIdx];
+  flow.order = { no: no + 1, customer: c.name, from: c.from, knife: c.knife, line: c.line, targetIdx, target: t.id, targetName: t.name, need: t.need, goal: t.need + marginSpan(t.need), done: false };
+  flow.result = null;
+  ui.orderNo.textContent = `委託 第 ${no + 1} 件`;
+  ui.orderName.textContent = c.name;
+  ui.orderFrom.textContent = c.from;
+  ui.orderLine.textContent = `「${c.line}」`;
+  ui.orderKnife.textContent = c.knife;
+  ui.orderTarget.innerHTML = `切開 <b>${t.name}</b>（${t.need > 0 ? `鋒利度需 ${Math.round(t.need * 100)}%` : '暖身：輕鬆磨一磨就好'}）`;
+  setScreen('order');
+  setFlowMode(null);
+  leaveResult();
+}
+
+/** Accept the order: dull edge, coarse stone, fresh stats, then sharpen. */
+function acceptOrder() {
+  if (game.mode === 'test' || game.mode === 'exit') return;
+  if (flow.screen !== 'order' || !flow.order) startOrder();
+  setFlowMode('order');
+  seg.flash.fill(0);
+  setSharpness(SCORE.orderStart);
+  selectStone(0, true);
+  setAngle(START_ANGLE);
+  game.knifeX = game.knifeTargetX = 0;
+  game.hintTimer = 0;
+  game.pressure = 0;
+  game.speed = 0;
+  game.burr = 0;
+  game.hold = 0;
+  stats.dist = stats.angleDist = stats.pressDist = stats.strokes = 0;
+  stats.goalDist = -1;
+  // Stone wear intentionally persists between orders.
+  flow.ready = game.sharpness >= flow.order.need - 1e-6;
+  flow.result = null;
+  updateOrderHud();
+  showStageTarget(flow.order.targetIdx);
+  setScreen('sharpen');
+}
+
+/** Free sharpening (the round-3 sandbox): target chips, free-mode result card. */
+function startFree() {
+  if (game.mode === 'test') return;
+  setFlowMode('free');
+  setScreen('sharpen');
+  leaveResult();
+  if (game.mode === 'sharpen') showStageTarget(game.selected);
 }
 
 // ---------------------------------------------------------------------------
@@ -2256,16 +2539,18 @@ function setSharpness(v) {
   while (game.unlocked < TARGETS.length - 1 && v >= TARGETS[game.unlocked + 1].need - 1e-6) game.unlocked++;
   game.selected = Math.min(game.selected, game.unlocked);
   refreshTargets();
-  if (game.mode === 'sharpen') showStageTarget(game.selected);
+  if (game.mode === 'sharpen') showStageTarget(cutIdx());
   return v;
 }
 
 selectStone(0, true);
 refreshTargets();
 showStageTarget(0);
+setScreen('title'); // the page opens on the title screen; test hooks still work from here
 
 // Debug: ?demo=0.8 starts with that sharpness and cuts the hardest unlocked target immediately.
 if (params.has('demo')) {
+  startFree();
   setSharpness(parseFloat(params.get('demo')));
   runTest(TARGETS[game.unlocked].id);
 }
@@ -2360,7 +2645,7 @@ window.__knife = {
     const vw = W - 2 * cine.barH, vh = H - 2 * cine.barV;
     return { amount: cine.bars, barPx: cine.barV, sidePx: cine.barH, visibleHeightRatio: vh / H, visibleWidthRatio: vw / W, visibleAspect: vw / vh, targetAspect: LETTERBOX_ASPECT };
   },
-  get target() { return cine.target ?? TARGETS[game.selected].id; },
+  get target() { return cine.target ?? TARGETS[cutIdx()].id; },
   get selected() { return TARGETS[game.selected].id; },
   get unlocked() { return TARGETS.slice(0, game.unlocked + 1).map((t) => t.id); },
   get timeScale() { return timeScale; },
@@ -2375,8 +2660,35 @@ window.__knife = {
   targets: TARGETS,
   stones: STONES,
   constants: { SLOWMO_SCALE, HITSTOP_MAX, FAIL_HITSTOP, LETTERBOX_ASPECT, CUT_TILT_DEG: 30, BAND: [BAND_LO, BAND_HI] },
-  /** Run the test-cut cinematic (bypasses the lock; below the requirement it bounces). opts.fail forces a bounce. */
-  testCut(id = TARGETS[game.selected].id, opts = {}) { return runTest(id, opts); },
+  /**
+   * Run the test-cut cinematic (bypasses the lock; below the requirement it bounces). opts.fail forces a bounce.
+   * From the title or order card it switches to free mode first; in order mode it always cuts the order's target.
+   */
+  testCut(id, opts = {}) {
+    if (flow.screen === 'title' || flow.screen === 'order') startFree();
+    if (flow.mode === 'order') id = flow.order.target;
+    return runTest(id ?? TARGETS[game.selected].id, opts);
+  },
+  /** Flow snapshot: screen, mode, current order, last order score / rank. */
+  flow() {
+    const o = flow.order, r = flow.result;
+    return {
+      screen: flow.screen, mode: flow.mode, completed: flow.completed, ready: flow.ready,
+      order: o && { no: o.no, customer: o.customer, from: o.from, knife: o.knife, target: o.target, targetName: o.targetName, need: o.need },
+      score: r ? r.score : null, rank: r ? r.rank : null, success: r ? r.success : null,
+      breakdown: r && Object.fromEntries(Object.entries(r.parts).map(([k, v]) => [k, { ratio: v.ratio, pts: v.pts, max: v.max }])),
+      stats: { ...stats },
+    };
+  },
+  /** title / result -> order card. Returns flow(). */
+  startOrder() { startOrder(); return this.flow(); },
+  /** order card -> sharpening (opens the next order card first if none is showing). Returns flow(). */
+  acceptOrder() { acceptOrder(); return this.flow(); },
+  /** -> free sharpening (round-3 sandbox). Returns flow(). */
+  startFree() { startFree(); return this.flow(); },
+  /** -> title screen. Returns flow(). */
+  title() { showTitle(); return this.flow(); },
+  scoring: { SCORE, RANK_TABLE },
   /** Snapshot for headless tests. */
   state() {
     return {
@@ -2384,6 +2696,7 @@ window.__knife = {
       shake, letterbox: this.letterbox, target: this.target, selected: this.selected, unlocked: this.unlocked,
       sharpness: game.sharpness, angle: game.angle, pressure: game.pressure, stone: this.stone, wear: this.wear,
       halvesVisible: this.halvesVisible, lastResult: cine.lastResult, fps: window.__fps,
+      screen: flow.screen, flowMode: flow.mode,
     };
   },
   /** Debug only. */
