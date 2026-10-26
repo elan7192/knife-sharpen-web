@@ -1,3 +1,5 @@
 _private/
+models/
 node_modules/
 .vercel/
+screenshot.png

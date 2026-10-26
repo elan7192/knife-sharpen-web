@@ -1,25 +1,45 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+
+// ---------------------------------------------------------------------------
+// URL options
+//   ?time=day|dusk  force a palette (default: dusk between 17:00 and 06:00)
+//   ?demo=0.8       debug: start with that sharpness and run the test cut immediately
+// Everything in the scene is procedural geometry: no model, texture or HDRI files are loaded.
+// ---------------------------------------------------------------------------
+const params = new URLSearchParams(location.search);
+const hour = new Date().getHours();
+const TIME = params.get('time') === 'dusk' || params.get('time') === 'day' ? params.get('time') : hour >= 17 || hour < 6 ? 'dusk' : 'day';
 
 // ---------------------------------------------------------------------------
 // Tuning
 // ---------------------------------------------------------------------------
-const TARGET_ANGLE = 15;
-const ANGLE_TOL = 3;
+const BAND_LO = 15; // angle sweet spot (degrees)
+const BAND_HI = 20;
 const ANGLE_MIN = 0;
 const ANGLE_MAX = 30;
-const START_ANGLE = 24;
+const START_ANGLE = 26;
 const ANGLE_PER_PX = 0.06; // degrees per pixel of vertical finger movement
-const PRESS_LO = 0.4;
-const PRESS_HI = 0.72;
-const STONE_LEN = 0.42;
-const STONE_W = 0.13;
-const STONE_TOP = 0.085; // stone surface height above the table top
-const KNIFE_TRAVEL = STONE_LEN / 2 - 0.04;
+// Pressure sweet zone: deliberately wide so phone swipes land in it easily.
+const PRESS_LO = 0.3;
+const PRESS_HI = 0.8;
+const STONE_LEN = 0.21; // 05-model-specs: ~0.21 x 0.07 x 0.03 m
+const STONE_W = 0.07;
+const STONE_H = 0.03;
+const HOLDER_H = 0.035; // 砥石台 height under the stone
+const STONE_TOP = HOLDER_H + STONE_H; // stone surface height above the table top
+const KNIFE_TRAVEL = STONE_LEN / 2 - 0.02;
 const KNIFE_YAW = 2.44; // handle toward the player's right hand
-const STATION_X = -0.35; // whetstone sits on the cloth, clear of the leaves baked into the table model
+const STATION_X = 0;
+const TABLE_TOP = 0.78;
+const STAGE_TOP = 0.68;
+
+// Edge coverage: the edge is split into segments; each one is polished separately.
+const SEGS = 10;
+const SEG_LEVELS = [0.25, 0.5, 0.75, 1]; // each crossing rings the 刃鳴 and brightens the gleam
+const GAIN_PER_PASS = 0.06; // progress a segment gains per ideal full pass over it
+const SEG_WINDOW = 1.5 / SEGS; // contact patch half-width in edge units
 
 const TIERS = [
   { key: 'paper', name: '紙', need: 0.2 },
@@ -28,11 +48,9 @@ const TIERS = [
   { key: 'ice', name: '冰山', need: 0.9 },
 ];
 const RANKS = ['鈍刀', '入門', '利刃', '名刀', '神品'];
+const HITSTOP_MAX = 0.12; // seconds; research: hitstop must be capped
 
-const DRACO_PATH = 'https://unpkg.com/three@0.170.0/examples/jsm/libs/draco/gltf/';
-const MODEL_TIMEOUT_MS = 12000;
-
-const isTouch = matchMedia('(pointer: coarse)').matches;
+const isMobile = matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 1;
 const clamp = THREE.MathUtils.clamp;
 const lerp = THREE.MathUtils.lerp;
 const damp = (current, target, rate, dt) => lerp(current, target, 1 - Math.exp(-rate * dt));
@@ -46,89 +64,119 @@ const easeOutBounce = (t) => {
   if (t < 2.5 / d) return n * (t -= 2.25 / d) * t + 0.9375;
   return n * (t -= 2.625 / d) * t + 0.984375;
 };
+let seed = 11;
+const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
 
 // ---------------------------------------------------------------------------
-// Renderer / scene / camera
+// Renderer
 // ---------------------------------------------------------------------------
 const app = document.getElementById('app');
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+const pixelRatio = () => Math.min(window.devicePixelRatio || 1, isMobile ? 1.5 : 2);
+renderer.setPixelRatio(pixelRatio());
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.0;
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.type = isMobile ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
 app.appendChild(renderer.domElement);
 const canvas = renderer.domElement;
 
-const scene = new THREE.Scene();
-const SKY = new THREE.Color('#a8bfae');
-scene.background = SKY;
-scene.fog = new THREE.Fog(SKY, 5, 14);
+// ---------------------------------------------------------------------------
+// Palettes (/workspace/game-art/palettes.json): one per time of day, plus the test-cut climax.
+// Colours not in the palette (grass shade, dark wood) are derived from palette entries.
+// ---------------------------------------------------------------------------
+const PALETTES = {
+  day: {
+    skyTop: '#C9D8C5', skyBottom: '#F3EBDD', wood: '#B08A63', stone: '#7C7A75', water: '#4E6E7E',
+    leaf: '#6F8F6A', moss: '#C9D8C5', gravel: '#DCD3C3', sun: '#FFF4E2', sunI: 2.1,
+    hemiSky: '#F3EBDD', hemiGround: '#6F8F6A', hemiI: 0.95, envI: 0.55, glow: '#FFD27A', lanternI: 0.6,
+  },
+  dusk: {
+    skyTop: '#8E6C8A', skyBottom: '#F2B880', wood: '#A8643C', stone: '#5C5650', water: '#3E4A61',
+    leaf: '#5E7A5C', moss: '#8E9A80', gravel: '#B9A493', sun: '#F2B880', sunI: 1.25,
+    hemiSky: '#8E6C8A', hemiGround: '#3E4A61', hemiI: 0.8, envI: 0.45, glow: '#FFD27A', lanternI: 1.6,
+  },
+};
+const P = Object.fromEntries(Object.entries(PALETTES[TIME]).map(([k, v]) => [k, typeof v === 'string' ? new THREE.Color(v) : v]));
+const CLIMAX = {
+  bg: new THREE.Color('#0B0D12'), ambient: new THREE.Color('#1C2A3A'), rim: new THREE.Color('#9FB7C9'),
+  slash: '#E8F1F8', accent: '#D7263D', heat: new THREE.Color('#F4C95D'), gleam: new THREE.Color('#E8F1F8'),
+};
+const INK = '#2B2A28';
+document.body.classList.add(TIME);
+const shade = (c, k) => new THREE.Color(c).multiplyScalar(k);
 
+const scene = new THREE.Scene();
+scene.background = CLIMAX.bg;
+scene.fog = new THREE.Fog(P.skyBottom.clone(), 5, 14);
+
+// Gradient sky dome; uDark blends it to the climax black.
+const skyMat = new THREE.ShaderMaterial({
+  side: THREE.BackSide, depthWrite: false, fog: false,
+  uniforms: { uTop: { value: P.skyTop }, uBottom: { value: P.skyBottom }, uDark: { value: 0 }, uBg: { value: CLIMAX.bg } },
+  vertexShader: 'varying vec3 vP; void main(){ vP = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+  fragmentShader: `uniform vec3 uTop, uBottom, uBg; uniform float uDark; varying vec3 vP;
+    void main(){ vec3 c = mix(uBottom, uTop, smoothstep(0.0, 0.55, vP.y)); gl_FragColor = vec4(mix(c, uBg, uDark), 1.0);
+    #include <colorspace_fragment>
+    }`,
+});
+scene.add(new THREE.Mesh(new THREE.SphereGeometry(35, 24, 12), skyMat));
+
+// Procedural IBL so the metal has something to reflect (no external HDRI).
 const pmrem = new THREE.PMREMGenerator(renderer);
 scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-scene.environmentIntensity = 0.45;
+scene.environmentIntensity = P.envI;
 pmrem.dispose();
 
-const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.02, 40);
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.02, 80);
 
-// Lights
-const hemi = new THREE.HemisphereLight('#e8f0ff', '#5a4a36', 0.9);
+// Lights: one shadow-casting sun + sky ambient (style guide), lantern glow, and a cold rim for the climax.
+const hemi = new THREE.HemisphereLight(P.hemiSky, P.hemiGround, P.hemiI);
 scene.add(hemi);
-const sun = new THREE.DirectionalLight('#fff1dc', 1.9);
-sun.position.set(2.2, 4.5, 2.0);
+const sun = new THREE.DirectionalLight(P.sun, P.sunI);
+sun.position.set(TIME === 'dusk' ? -3.2 : 2.2, TIME === 'dusk' ? 2.6 : 4.5, 2.0);
 sun.castShadow = true;
-sun.shadow.mapSize.setScalar(isTouch ? 1024 : 2048);
-Object.assign(sun.shadow.camera, { left: -3, right: 3, top: 3, bottom: -3, near: 0.5, far: 12 });
+sun.shadow.mapSize.setScalar(isMobile ? 1024 : 2048);
+Object.assign(sun.shadow.camera, { left: -2.5, right: 2.5, top: 2.5, bottom: -2.5, near: 0.5, far: 12 });
 sun.shadow.bias = -0.0004;
 sun.shadow.normalBias = 0.02;
 scene.add(sun);
-const lanternLight = new THREE.PointLight('#ffb35c', 1.2, 3, 2);
+const lanternLight = new THREE.PointLight(P.glow, P.lanternI, 3, 2); // no shadows: only the sun casts
 scene.add(lanternLight);
+const rim = new THREE.DirectionalLight(CLIMAX.rim, 0);
+scene.add(rim, rim.target);
 
 // ---------------------------------------------------------------------------
-// Shared materials
+// Shared materials (scenery: flat-shaded, rough, never competes with the knife)
 // ---------------------------------------------------------------------------
+const flat = (color, roughness = 0.85, extra = {}) => new THREE.MeshStandardMaterial({ color, roughness, flatShading: true, ...extra });
 const mat = {
-  wood: new THREE.MeshStandardMaterial({ color: '#8a5a36', roughness: 0.8, flatShading: true }),
-  darkWood: new THREE.MeshStandardMaterial({ color: '#4a2f1d', roughness: 0.75, flatShading: true }),
-  handle: new THREE.MeshStandardMaterial({ color: '#7a5434', roughness: 0.65 }),
-  horn: new THREE.MeshStandardMaterial({ color: '#1a1512', roughness: 0.35 }),
-  stoneTop: new THREE.MeshStandardMaterial({ color: '#c06b3e', roughness: 0.85 }),
-  stoneBottom: new THREE.MeshStandardMaterial({ color: '#7b8789', roughness: 0.9 }),
-  rubber: new THREE.MeshStandardMaterial({ color: '#2a2d2b', roughness: 0.95 }),
-  rock: new THREE.MeshStandardMaterial({ color: '#7d7f78', roughness: 0.95, flatShading: true }),
-  sand: new THREE.MeshStandardMaterial({ color: '#d6ccb4', roughness: 1 }),
-  water: new THREE.MeshPhysicalMaterial({ color: '#4d6b6e', roughness: 0.05, metalness: 0, transparent: true, opacity: 0.85 }),
-  blade: new THREE.MeshPhysicalMaterial({ color: '#e6e9ee', metalness: 1, roughness: 0.6, envMapIntensity: 1.4 }),
+  wood: flat(P.wood, 0.85),
+  darkWood: flat(shade(P.wood, 0.55), 0.85),
+  handle: new THREE.MeshStandardMaterial({ color: shade(P.wood, 0.42), roughness: 0.5 }),
+  horn: flat(INK, 0.5),
+  stoneTop: new THREE.MeshStandardMaterial({ color: P.stone.clone().lerp(P.wood, 0.3), roughness: 0.85 }),
+  stoneBottom: new THREE.MeshStandardMaterial({ color: shade(P.water, 0.9), roughness: 0.9 }),
+  rock: flat(P.stone, 0.92),
+  paleRock: flat(shade(P.stone, 1.15), 0.9),
+  moss: flat(P.leaf, 1),
+  mossLight: flat(P.moss, 1),
+  gravel: flat(P.gravel, 1),
+  rake: flat(shade(P.gravel, 0.9), 1),
+  paper: new THREE.MeshStandardMaterial({ color: '#fff6e4', emissive: P.glow, emissiveIntensity: TIME === 'dusk' ? 1.3 : 0.55, roughness: 0.9, side: THREE.DoubleSide }),
+  water: new THREE.MeshPhysicalMaterial({ color: P.water, roughness: 0.05, metalness: 0, transparent: true, opacity: 0.85 }),
+  // Knife: PBR metal (metalness 1); body roughness 0.38 -> 0.12 as it sharpens (style guide 0.25-0.4 -> ~0.1).
+  blade: new THREE.MeshPhysicalMaterial({ color: '#e9ecf0', metalness: 1, roughness: 0.38, envMapIntensity: 1.3, side: THREE.DoubleSide }),
+  steel: new THREE.MeshStandardMaterial({ color: '#d5d9de', metalness: 1, roughness: 0.25 }),
 };
+const STONE_DRY = mat.stoneTop.color.clone();
+const STONE_WET = STONE_DRY.clone().lerp(P.water, 0.35);
 
 // ---------------------------------------------------------------------------
-// World layout
+// Geometry helpers
 // ---------------------------------------------------------------------------
-let tableTop = 0.78; // updated once the table model is fitted
-const onTable = new THREE.Group();
-onTable.position.y = tableTop;
-scene.add(onTable);
-
-const STAGE_POS = new THREE.Vector3(1.55, 0, -0.35);
-let stageTop = 0.7;
-const stage = new THREE.Group();
-stage.position.set(STAGE_POS.x, stageTop, STAGE_POS.z);
-scene.add(stage);
-
-function enableShadows(obj, cast = true, receive = true) {
-  obj.traverse((o) => {
-    if (o.isMesh) {
-      o.castShadow = cast;
-      o.receiveShadow = receive;
-    }
-  });
-  return obj;
-}
-
 function mesh(geo, material, cast = true, receive = true) {
   const m = new THREE.Mesh(geo, material);
   m.castShadow = cast;
@@ -136,69 +184,204 @@ function mesh(geo, material, cast = true, receive = true) {
   return m;
 }
 
-// Ground: raked sand + a moss ring
-{
-  const ground = mesh(new THREE.CircleGeometry(30, 48), mat.sand, false, true);
-  ground.rotation.x = -Math.PI / 2;
-  scene.add(ground);
-  const rakeMat = new THREE.MeshStandardMaterial({ color: '#c9bea4', roughness: 1 });
-  for (let i = 0; i < 9; i++) {
-    const ring = mesh(new THREE.RingGeometry(2.4 + i * 0.35, 2.46 + i * 0.35, 64), rakeMat, false, true);
-    ring.rotation.x = -Math.PI / 2;
-    ring.position.y = 0.002;
-    scene.add(ring);
+const tmpM = new THREE.Matrix4();
+const tmpQ = new THREE.Quaternion();
+const tmpE = new THREE.Euler();
+const tmpS = new THREE.Vector3();
+const tmpT = new THREE.Vector3();
+/** Bakes a transform into a geometry (non-indexed, so mixed primitives can be merged). */
+function place(geo, x = 0, y = 0, z = 0, rx = 0, ry = 0, rz = 0, sx = 1, sy = sx, sz = sx) {
+  const g = geo.index ? geo.toNonIndexed() : geo;
+  if (g !== geo) geo.dispose();
+  tmpM.compose(tmpT.set(x, y, z), tmpQ.setFromEuler(tmpE.set(rx, ry, rz)), tmpS.set(sx, sy, sz));
+  return g.applyMatrix4(tmpM);
+}
+/** Several primitives sharing one material -> one draw call. */
+function merged(geos, material, cast = true, receive = true) {
+  const g = mergeGeometries(geos);
+  geos.forEach((x) => x.dispose());
+  g.computeVertexNormals();
+  return mesh(g, material, cast, receive);
+}
+/** A low-poly rock: polyhedron with seeded vertex jitter (shared corners stay welded). */
+function rockGeo(r, detail = 0, jitter = 0.22) {
+  const g = new THREE.IcosahedronGeometry(r, detail);
+  const p = g.attributes.position;
+  const offsets = new Map();
+  for (let i = 0; i < p.count; i++) {
+    const key = `${p.getX(i).toFixed(4)},${p.getY(i).toFixed(4)},${p.getZ(i).toFixed(4)}`;
+    if (!offsets.has(key)) offsets.set(key, 1 - jitter / 2 + rand() * jitter);
+    const k = offsets.get(key);
+    p.setXYZ(i, p.getX(i) * k, p.getY(i) * k, p.getZ(i) * k);
   }
-  const moss = mesh(new THREE.CircleGeometry(0.9, 9), new THREE.MeshStandardMaterial({ color: '#5f7a3c', roughness: 1, flatShading: true }), false, true);
-  moss.rotation.x = -Math.PI / 2;
-  moss.position.set(-2.4, 0.003, -1.1);
-  moss.scale.set(1.4, 1, 1);
-  scene.add(moss);
+  return g;
+}
+function hash3(x, y, z) {
+  const s = Math.sin(x * 127.1 + y * 311.7 + z * 74.7) * 43758.5453;
+  return s - Math.floor(s);
 }
 
-// Whetstone on a wooden holder with a rubber base
-const stoneGroup = new THREE.Group();
+// ---------------------------------------------------------------------------
+// World layout (all procedural, palette-coloured, flat-shaded low poly)
+// ---------------------------------------------------------------------------
+const onTable = new THREE.Group();
+onTable.position.y = TABLE_TOP;
+scene.add(onTable);
+
+const STAGE_POS = new THREE.Vector3(1.45, 0, -0.3);
+const stage = new THREE.Group();
+stage.position.set(STAGE_POS.x, STAGE_TOP, STAGE_POS.z);
+scene.add(stage);
+
+// Ground: grass, a raked gravel bed around the work area, and a few moss patches
 {
-  const base = mesh(new THREE.BoxGeometry(STONE_LEN + 0.08, 0.02, STONE_W + 0.06), mat.rubber);
-  base.position.y = 0.01;
-  const holder = mesh(new THREE.BoxGeometry(STONE_LEN + 0.04, 0.025, STONE_W + 0.03), mat.darkWood);
-  holder.position.y = 0.0325;
-  const bottom = mesh(new THREE.BoxGeometry(STONE_LEN, 0.015, STONE_W), mat.stoneBottom);
-  bottom.position.y = 0.0525;
-  const top = mesh(new THREE.BoxGeometry(STONE_LEN, 0.025, STONE_W), mat.stoneTop);
-  top.position.y = STONE_TOP - 0.0125;
-  stoneGroup.add(base, holder, bottom, top);
-  stoneGroup.position.x = STATION_X;
+  const ground = mesh(new THREE.CircleGeometry(34, 24), mat.moss, false, true);
+  ground.rotation.x = -Math.PI / 2;
+  scene.add(ground);
+  const gravel = mesh(new THREE.CircleGeometry(5.6, 32), mat.gravel, false, true);
+  gravel.rotation.x = -Math.PI / 2;
+  gravel.position.y = 0.002;
+  gravel.scale.set(1.15, 1, 1);
+  scene.add(gravel);
+  const rings = [];
+  for (let i = 0; i < 9; i++) rings.push(place(new THREE.RingGeometry(2.4 + i * 0.35, 2.46 + i * 0.35, 48), 0, 0.004, 0, -Math.PI / 2));
+  scene.add(merged(rings, mat.rake, false, true));
+  const moss = [];
+  for (const [x, z, r, sx] of [[-2.4, -1.1, 0.9, 1.4], [2.6, -1.4, 0.7, 1.2], [-3.4, 0.9, 0.6, 1.1]]) {
+    moss.push(place(new THREE.CircleGeometry(r, 9), x, 0.006, z, -Math.PI / 2, 0, 0, sx, 1, 1));
+  }
+  scene.add(merged(moss, mat.mossLight, false, true));
 }
-onTable.add(stoneGroup);
+
+// Plank table (main table; whetstone sits on it)
+{
+  const W = 1.5, D = 0.8, T = 0.045, PLANKS = 5;
+  const tops = [];
+  for (let i = 0; i < PLANKS; i++) {
+    const z = -D / 2 + (i + 0.5) * (D / PLANKS);
+    tops.push(place(new THREE.BoxGeometry(W + (rand() - 0.5) * 0.04, T, D / PLANKS - 0.006), (rand() - 0.5) * 0.02, TABLE_TOP - T / 2 - rand() * 0.002, z));
+  }
+  scene.add(merged(tops, mat.wood));
+  const frame = [];
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+    frame.push(place(new THREE.BoxGeometry(0.07, TABLE_TOP - T, 0.07), sx * (W / 2 - 0.1), (TABLE_TOP - T) / 2, sz * (D / 2 - 0.08)));
+  }
+  for (const sx of [-1, 1]) frame.push(place(new THREE.BoxGeometry(0.05, 0.05, D - 0.16), sx * (W / 2 - 0.1), 0.18, 0));
+  frame.push(place(new THREE.BoxGeometry(W - 0.2, 0.05, 0.04), 0, 0.18, 0));
+  for (const sz of [-1, 1]) frame.push(place(new THREE.BoxGeometry(W - 0.12, 0.06, 0.03), 0, TABLE_TOP - T - 0.03, sz * (D / 2 - 0.08)));
+  scene.add(merged(frame, mat.darkWood));
+}
+
+// Whetstone on a wooden holder (砥石台)
+{
+  const stoneGroup = new THREE.Group();
+  const holder = [];
+  for (const sx of [-1, 1]) holder.push(place(new THREE.BoxGeometry(0.03, 0.015, STONE_W + 0.07), sx * (STONE_LEN / 2 - 0.03), 0.0075, 0)); // feet
+  holder.push(place(new THREE.BoxGeometry(STONE_LEN + 0.05, HOLDER_H - 0.015, STONE_W + 0.03), 0, 0.015 + (HOLDER_H - 0.015) / 2, 0)); // bed
+  for (const sx of [-1, 1]) holder.push(place(new THREE.BoxGeometry(0.012, 0.016, STONE_W + 0.03), sx * (STONE_LEN / 2 + 0.008), HOLDER_H + 0.008, 0)); // end stops
+  stoneGroup.add(merged(holder, mat.darkWood));
+  const bottom = mesh(new THREE.BoxGeometry(STONE_LEN, STONE_H * 0.4, STONE_W), mat.stoneBottom);
+  bottom.position.y = HOLDER_H + STONE_H * 0.2;
+  const top = mesh(new THREE.BoxGeometry(STONE_LEN, STONE_H * 0.6, STONE_W), mat.stoneTop);
+  top.position.y = HOLDER_H + STONE_H * 0.7;
+  stoneGroup.add(bottom, top);
+  stoneGroup.position.x = STATION_X;
+  onTable.add(stoneGroup);
+}
 
 // Water bucket for flavour
 {
   const bucket = new THREE.Group();
-  const shell = mesh(new THREE.CylinderGeometry(0.11, 0.095, 0.14, 12, 1, true), mat.wood);
-  shell.material = shell.material.clone();
-  shell.material.side = THREE.DoubleSide;
-  shell.position.y = 0.07;
-  const floor = mesh(new THREE.CylinderGeometry(0.095, 0.095, 0.01, 12), mat.wood);
+  const shellMat = mat.wood.clone();
+  shellMat.side = THREE.DoubleSide;
+  const shell = mesh(new THREE.CylinderGeometry(0.09, 0.08, 0.12, 10, 1, true), shellMat);
+  shell.position.y = 0.06;
+  const floor = mesh(new THREE.CylinderGeometry(0.08, 0.08, 0.01, 10), mat.wood);
   floor.position.y = 0.005;
-  const band = mesh(new THREE.TorusGeometry(0.105, 0.006, 4, 12), mat.horn);
+  const band = mesh(new THREE.TorusGeometry(0.087, 0.005, 4, 10), mat.horn);
   band.rotation.x = Math.PI / 2;
-  band.position.y = 0.1;
-  const water = mesh(new THREE.CircleGeometry(0.102, 12), mat.water, false, false);
+  band.position.y = 0.085;
+  const water = mesh(new THREE.CircleGeometry(0.086, 10), mat.water, false, false);
   water.rotation.x = -Math.PI / 2;
-  water.position.y = 0.11;
+  water.position.y = 0.095;
   bucket.add(shell, floor, band, water);
-  bucket.position.set(0.0, 0, -0.4);
+  bucket.position.set(0.42, 0, -0.24);
   onTable.add(bucket);
 }
 
+// Oil lantern (行灯): wooden frame, four glowing paper panels, warm point light inside
+const LANTERN_POS = new THREE.Vector3(-0.5, 0, -0.22);
+const LANTERN_H = 0.3;
+{
+  const g = new THREE.Group();
+  const S = 0.12, H = LANTERN_H;
+  const frame = [];
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) frame.push(place(new THREE.BoxGeometry(0.012, H, 0.012), sx * S / 2, H / 2, sz * S / 2));
+  for (const y of [0.04, H - 0.006]) {
+    for (const s of [-1, 1]) {
+      frame.push(place(new THREE.BoxGeometry(S + 0.012, 0.012, 0.012), 0, y, s * S / 2));
+      frame.push(place(new THREE.BoxGeometry(0.012, 0.012, S + 0.012), s * S / 2, y, 0));
+    }
+  }
+  frame.push(place(new THREE.BoxGeometry(S * 0.8, 0.008, S * 0.8), 0, 0.05, 0)); // oil-dish shelf
+  frame.push(place(new THREE.BoxGeometry(0.012, 0.04, 0.008), -S * 0.3, H + 0.02, 0)); // carry handle
+  frame.push(place(new THREE.BoxGeometry(0.012, 0.04, 0.008), S * 0.3, H + 0.02, 0));
+  frame.push(place(new THREE.BoxGeometry(S * 0.7, 0.01, 0.01), 0, H + 0.04, 0));
+  g.add(merged(frame, mat.darkWood));
+  const panels = [];
+  for (let i = 0; i < 4; i++) {
+    const a = (i * Math.PI) / 2;
+    panels.push(place(new THREE.PlaneGeometry(S - 0.006, H - 0.06), Math.sin(a) * (S / 2 - 0.002), 0.04 + (H - 0.05) / 2, Math.cos(a) * (S / 2 - 0.002), 0, a));
+  }
+  g.add(merged(panels, mat.paper, false, false));
+  g.position.copy(LANTERN_POS);
+  g.rotation.y = 0.5;
+  onTable.add(g);
+}
+
+// Round test-cut table
+{
+  const top = mesh(new THREE.CylinderGeometry(0.4, 0.4, 0.045, 16), mat.wood);
+  top.position.set(STAGE_POS.x, STAGE_TOP - 0.0225, STAGE_POS.z);
+  const base = merged([
+    place(new THREE.CylinderGeometry(0.05, 0.065, STAGE_TOP - 0.045, 8), 0, (STAGE_TOP - 0.045) / 2, 0),
+    place(new THREE.CylinderGeometry(0.22, 0.25, 0.04, 8), 0, 0.02, 0),
+    place(new THREE.CylinderGeometry(0.16, 0.12, 0.04, 8), 0, STAGE_TOP - 0.065, 0),
+  ], mat.darkWood);
+  base.position.set(STAGE_POS.x, 0, STAGE_POS.z);
+  scene.add(top, base);
+}
+
+// Stepping stones, rock clusters, boulders
+{
+  const steps = [];
+  for (let i = 0; i < 6; i++) {
+    const r = 0.22 + rand() * 0.06;
+    steps.push(place(new THREE.CylinderGeometry(r, r * 1.05, 0.07, 7), -1.7 + i * 0.42 + (i % 2) * 0.05, 0.035, 1.05 + (i % 2) * 0.22 - i * 0.12, 0, rand() * 3, 0, 1, 1, 0.8 + rand() * 0.2));
+  }
+  scene.add(merged(steps, mat.paleRock));
+
+  const rocks = [];
+  const cluster = (cx, cz, n, size) => {
+    for (let i = 0; i < n; i++) {
+      const r = size * (0.5 + rand() * 0.6);
+      rocks.push(place(rockGeo(r), cx + (rand() - 0.5) * size * 2.4, r * 0.45, cz + (rand() - 0.5) * size * 2, rand() * 3, rand() * 3, 0, 1, 0.7, 1));
+    }
+  };
+  cluster(-2.2, -1.1, 5, 0.22);
+  cluster(0.8, -1.6, 3, 0.16);
+  cluster(2.4, 0.6, 3, 0.14);
+  rocks.push(place(rockGeo(0.5, 1, 0.18), 2.7, 0.35, -1.6, 0.3, 0.8, 0, 1.25, 0.85, 1));
+  rocks.push(place(rockGeo(0.32, 1, 0.2), -3.0, 0.2, 0.3, 0.2, 1.4, 0, 1.2, 0.8, 1));
+  scene.add(merged(rocks, mat.rock));
+}
+
 // ---------------------------------------------------------------------------
-// Bamboo grove (instanced, gently swaying)
+// Bamboo grove (instanced, gently swaying, no per-frame allocation)
 // ---------------------------------------------------------------------------
 const bamboo = (() => {
   const SEG_H = 0.42;
   const stalks = [];
-  let rnd = 7;
-  const rand = () => ((rnd = (rnd * 16807) % 2147483647) / 2147483647);
   for (let i = 0; i < 34; i++) {
     const a = -1.25 + (i / 33) * 2.5 + (rand() - 0.5) * 0.08;
     const r = 3.6 + rand() * 2.2;
@@ -209,35 +392,37 @@ const bamboo = (() => {
       radius: 0.03 + rand() * 0.025,
       lean: (rand() - 0.5) * 0.12,
       phase: rand() * Math.PI * 2,
-      tint: 0.8 + rand() * 0.3,
+      tint: 0.85 + rand() * 0.25,
     });
   }
   const totalSegs = stalks.reduce((n, s) => n + s.segs, 0);
-  const segGeo = new THREE.CylinderGeometry(1, 1, SEG_H, 7);
+  // Open-ended cylinders keep a stalk under the 500-tri budget (instanced).
+  const segGeo = new THREE.CylinderGeometry(1, 1, SEG_H, 7, 1, true);
   segGeo.translate(0, SEG_H / 2, 0);
-  const nodeGeo = new THREE.CylinderGeometry(1.18, 1.18, 0.03, 7);
+  const nodeGeo = new THREE.CylinderGeometry(1.18, 1.18, 0.03, 7, 1, true);
   const leafGeo = new THREE.ConeGeometry(0.05, 0.36, 3);
   leafGeo.rotateZ(Math.PI / 2);
   leafGeo.scale(1, 1, 0.25);
   leafGeo.translate(0.18, 0, 0);
 
-  const segMesh = new THREE.InstancedMesh(segGeo, new THREE.MeshStandardMaterial({ color: '#6f9a45', roughness: 0.6, flatShading: true }), totalSegs);
-  const nodeMesh = new THREE.InstancedMesh(nodeGeo, new THREE.MeshStandardMaterial({ color: '#c2c98a', roughness: 0.7, flatShading: true }), totalSegs);
+  const segMesh = new THREE.InstancedMesh(segGeo, flat(shade(P.leaf, 1.25), 0.6), totalSegs);
+  const nodeMesh = new THREE.InstancedMesh(nodeGeo, flat(P.moss, 0.7, { side: THREE.DoubleSide }), totalSegs);
   const LEAVES_PER = 14;
-  const leafMesh = new THREE.InstancedMesh(leafGeo, new THREE.MeshStandardMaterial({ color: '#4f7f35', roughness: 0.8, flatShading: true, side: THREE.DoubleSide }), stalks.length * LEAVES_PER);
+  const leafMesh = new THREE.InstancedMesh(leafGeo, flat(P.leaf, 0.8, { side: THREE.DoubleSide }), stalks.length * LEAVES_PER);
   segMesh.castShadow = true;
   leafMesh.castShadow = true;
   const color = new THREE.Color();
   let k = 0;
   stalks.forEach((s, si) => {
-    for (let j = 0; j < s.segs; j++, k++) segMesh.setColorAt(k, color.setRGB(s.tint, s.tint, s.tint * 0.9));
-    for (let j = 0; j < LEAVES_PER; j++) leafMesh.setColorAt(si * LEAVES_PER + j, color.setRGB(0.8 + rand() * 0.4, 0.9 + rand() * 0.2, 0.8));
+    for (let j = 0; j < s.segs; j++, k++) segMesh.setColorAt(k, color.setRGB(s.tint, s.tint, s.tint * 0.95));
+    for (let j = 0; j < LEAVES_PER; j++) leafMesh.setColorAt(si * LEAVES_PER + j, color.setRGB(0.85 + rand() * 0.3, 0.9 + rand() * 0.15, 0.85));
     s.leaves = Array.from({ length: LEAVES_PER }, () => ({
       seg: s.segs - 4 + Math.floor(rand() * 4),
       yaw: rand() * Math.PI * 2,
       droop: -0.2 - rand() * 0.6,
       scale: 0.7 + rand() * 0.6,
     }));
+    s.jointPos = Array.from({ length: s.segs }, () => new THREE.Vector3());
   });
   scene.add(segMesh, nodeMesh, leafMesh);
 
@@ -246,6 +431,7 @@ const bamboo = (() => {
   const e = new THREE.Euler();
   const p = new THREE.Vector3();
   const sc = new THREE.Vector3();
+  const lsc = new THREE.Vector3();
   const dir = new THREE.Vector3();
 
   function update(t) {
@@ -253,28 +439,23 @@ const bamboo = (() => {
     for (const s of stalks) {
       const sway = Math.sin(t * 0.8 + s.phase) * 0.018 + Math.sin(t * 1.9 + s.phase * 2) * 0.006;
       p.set(s.x, 0, s.z);
-      const joints = [];
+      sc.set(s.radius, 1, s.radius);
       for (let j = 0; j < s.segs; j++) {
-        const bend = s.lean + sway * (j / s.segs) * 2.2;
-        e.set(0, 0, bend);
+        e.set(0, 0, s.lean + sway * (j / s.segs) * 2.2);
         q.setFromEuler(e);
-        sc.set(s.radius, 1, s.radius);
         m4.compose(p, q, sc);
         segMesh.setMatrixAt(si, m4);
-        joints.push({ pos: p.clone(), q: q.clone() });
+        s.jointPos[j].copy(p);
         dir.set(0, SEG_H, 0).applyQuaternion(q);
         p.add(dir);
-        sc.set(s.radius, 1, s.radius);
         m4.compose(p, q, sc);
         nodeMesh.setMatrixAt(si, m4);
         si++;
       }
       for (const leaf of s.leaves) {
-        const jt = joints[leaf.seg];
         e.set(0, leaf.yaw + sway * 3, leaf.droop + sway * 4, 'YXZ');
         q.setFromEuler(e);
-        sc.setScalar(leaf.scale);
-        m4.compose(jt.pos, q, sc);
+        m4.compose(s.jointPos[leaf.seg], q, lsc.setScalar(leaf.scale));
         leafMesh.setMatrixAt(li++, m4);
       }
     }
@@ -287,56 +468,157 @@ const bamboo = (() => {
 })();
 
 // ---------------------------------------------------------------------------
-// Knife
+// Knife: gyuto (牛刀), 21 cm blade with a curved belly, pointed tip, bolster, western handle.
+// Local frame: x along the edge (heel 0 -> tip BLADE_LEN), y up to the spine, z thickness.
+// Pivot at the heel / handle junction (05-model-specs).
 // ---------------------------------------------------------------------------
-const BLADE_LEN = 0.245;
+const BLADE_LEN = 0.21;
 const BLADE_H = 0.046;
-const CONTACT_X = 0.12; // point along the edge that rides the stone
+const TIP_Y = 0.017;
+const BELLY_START = 0.085;
+const SPINE_DROP = 0.1;
+const HALF_THICK = 0.0011;
+const NX = SEGS * 6 + 1; // columns along the edge (shared by blade and gleam line)
+const V_ROWS = [0, 0.03, 0.08, 0.2, 0.4, 0.65, 0.85, 1]; // edge -> spine (dense at the bevel)
+const GLEAM_ROWS = 3; // the first rows of V_ROWS form the bevel where the gleam line lives
+
+const edgeY = (x) => (x <= BELLY_START ? 0 : TIP_Y * Math.pow((x - BELLY_START) / (BLADE_LEN - BELLY_START), 2.1));
+const spineY = (x) => (x <= SPINE_DROP ? BLADE_H - x * 0.012 : lerp(BLADE_H - SPINE_DROP * 0.012, TIP_Y, Math.pow((x - SPINE_DROP) / (BLADE_LEN - SPINE_DROP), 1.7)));
+const edgeSlope = (x) => (edgeY(Math.min(BLADE_LEN, x + 0.002)) - edgeY(Math.max(0, x - 0.002))) / 0.004;
+
+function bladeVertex(target, x, v, side) {
+  const taper = 1 - 0.65 * Math.pow(x / BLADE_LEN, 2);
+  // Convex grind: thin at the edge, full thickness toward the spine.
+  const t = HALF_THICK * taper * (0.05 + 0.95 * Math.pow(v, 0.6));
+  return target.set(x, lerp(edgeY(x), spineY(x), v), side * t);
+}
+
+function buildBladeGeometry() {
+  const pos = [];
+  const idx = [];
+  const v3 = new THREE.Vector3();
+  const NV = V_ROWS.length;
+  for (const side of [1, -1]) {
+    const base = pos.length / 3;
+    for (let i = 0; i < NX; i++) {
+      for (let j = 0; j < NV; j++) {
+        bladeVertex(v3, (i / (NX - 1)) * BLADE_LEN, V_ROWS[j], side);
+        pos.push(v3.x, v3.y, v3.z);
+      }
+    }
+    for (let i = 0; i < NX - 1; i++) {
+      for (let j = 0; j < NV - 1; j++) {
+        const a = base + i * NV + j, b = base + (i + 1) * NV + j, c = b + 1, d = a + 1;
+        if (side > 0) idx.push(a, b, c, a, c, d);
+        else idx.push(a, c, b, a, d, c);
+      }
+    }
+  }
+  // Spine strip (own vertices so the corner stays crisp)
+  const spine = pos.length / 3;
+  for (let i = 0; i < NX; i++) {
+    for (const side of [1, -1]) {
+      bladeVertex(v3, (i / (NX - 1)) * BLADE_LEN, 1, side);
+      pos.push(v3.x, v3.y, v3.z);
+    }
+  }
+  for (let i = 0; i < NX - 1; i++) {
+    const a = spine + i * 2, b = a + 2;
+    idx.push(a, b + 1, b, a, a + 1, b + 1);
+  }
+  // Heel cap
+  const heel = pos.length / 3;
+  for (const side of [1, -1]) {
+    for (let j = 0; j < NV; j++) {
+      bladeVertex(v3, 0, V_ROWS[j], side);
+      pos.push(v3.x, v3.y, v3.z);
+    }
+  }
+  for (let j = 0; j < NV - 1; j++) idx.push(heel + j, heel + NV + j, heel + NV + j + 1, heel + j, heel + NV + j + 1, heel + j + 1);
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+/** The gleaming edge line: a ribbon over the bevel, coloured per segment (one draw call, shared by both knives). */
+function buildGleamGeometry() {
+  const pos = [];
+  const idx = [];
+  const info = []; // per vertex: segment, row fraction, x
+  const v3 = new THREE.Vector3();
+  for (const side of [1, -1]) {
+    const base = pos.length / 3;
+    for (let i = 0; i < NX; i++) {
+      const x = (i / (NX - 1)) * BLADE_LEN;
+      for (let j = 0; j < GLEAM_ROWS; j++) {
+        bladeVertex(v3, x, V_ROWS[j], side);
+        pos.push(v3.x, v3.y, v3.z + side * 0.00004);
+        info.push(Math.min(SEGS - 1, Math.floor((i / (NX - 1)) * SEGS)), j / (GLEAM_ROWS - 1), x / BLADE_LEN);
+      }
+    }
+    for (let i = 0; i < NX - 1; i++) {
+      for (let j = 0; j < GLEAM_ROWS - 1; j++) {
+        const a = base + i * GLEAM_ROWS + j, b = a + GLEAM_ROWS;
+        idx.push(a, b, b + 1, a, b + 1, a + 1);
+      }
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(pos.length), 3).setUsage(THREE.DynamicDrawUsage));
+  geo.setIndex(idx);
+  geo.userData.info = new Float32Array(info);
+  return geo;
+}
+
+const bladeGeo = buildBladeGeometry();
+const gleamGeo = buildGleamGeometry();
+const gleamMat = new THREE.MeshBasicMaterial({
+  vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false,
+  side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4,
+});
 
 function buildKnife() {
-  const shape = new THREE.Shape();
-  shape.moveTo(0, 0);
-  shape.lineTo(0.17, 0);
-  shape.quadraticCurveTo(0.228, 0.002, BLADE_LEN, 0.039);
-  shape.lineTo(0, BLADE_H);
-  shape.lineTo(0, 0);
-  const depth = 0.0026;
-  const geo = new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: false, curveSegments: 10 });
-  geo.translate(0, 0, -depth / 2);
-  // Flat-grind taper: thin at the edge, full thickness at the spine.
-  const pos = geo.attributes.position;
-  for (let i = 0; i < pos.count; i++) {
-    const y = pos.getY(i);
-    pos.setZ(i, pos.getZ(i) * lerp(0.08, 1, clamp(y / BLADE_H, 0, 1)));
-  }
-  geo.computeVertexNormals();
-
   const knife = new THREE.Group();
-  const blade = mesh(geo, mat.blade);
-  const handle = mesh(new THREE.CylinderGeometry(0.0115, 0.0125, 0.125, 8), mat.handle);
-  handle.rotation.z = Math.PI / 2;
-  handle.position.set(-0.075, 0.032, 0);
-  const ferrule = mesh(new THREE.CylinderGeometry(0.0128, 0.0128, 0.02, 8), mat.horn);
-  ferrule.rotation.z = Math.PI / 2;
-  ferrule.position.set(-0.008, 0.032, 0);
-  knife.add(blade, handle, ferrule);
-  knife.position.x = -CONTACT_X;
+  const blade = mesh(bladeGeo, mat.blade);
+  const gleam = mesh(gleamGeo, gleamMat, false, false);
+  gleam.renderOrder = 2;
+  const HY = BLADE_H - 0.015; // handle axis height (in line with the spine)
+  const bolster = mesh(new THREE.CapsuleGeometry(0.0065, 0.016, 4, 12).scale(1.3, 1.35, 0.62), mat.steel);
+  bolster.position.set(-0.004, HY - 0.003, 0);
+  const handle = mesh(new THREE.CapsuleGeometry(0.0115, 0.1, 4, 14).rotateZ(Math.PI / 2).scale(1, 1, 0.72), mat.handle);
+  handle.position.set(-0.07, HY, 0);
+  const rivets = merged([-0.03, -0.065, -0.1].map((x) => place(new THREE.CylinderGeometry(0.0022, 0.0022, 0.0175, 8), x, HY, 0, Math.PI / 2)), mat.steel, false, false);
+  const butt = mesh(new THREE.SphereGeometry(0.0085, 10, 6).scale(0.6, 1.1, 0.75), mat.steel);
+  butt.position.set(-0.128, HY + 0.0005, 0);
+  knife.add(blade, gleam, bolster, handle, rivets, butt);
   return knife;
 }
 
-// Sharpening knife: root (slides along stone) -> tilt (blade angle) -> knife
+/** Edge x (local) touched by the stone for edge coordinate u in [0, 1]. */
+const edgeXAt = (u) => lerp(0.012, BLADE_LEN - 0.008, u);
+
+// Sharpening knife: root (slides along stone) -> tilt (blade angle) -> contact (rocks onto the belly) -> knife
 const knifeRoot = new THREE.Group();
 knifeRoot.rotation.y = KNIFE_YAW;
 knifeRoot.position.set(STATION_X, STONE_TOP + 0.0005, 0);
 const knifeTilt = new THREE.Group();
+const knifeContact = new THREE.Group();
+const sharpKnife = buildKnife();
 knifeRoot.add(knifeTilt);
-knifeTilt.add(buildKnife());
+knifeTilt.add(knifeContact);
+knifeContact.add(sharpKnife);
 onTable.add(knifeRoot);
 
 // Test-cut knife, held blade-vertical above the stage
 const chopRig = new THREE.Group();
 chopRig.rotation.y = Math.PI / 2;
-chopRig.add(buildKnife());
+const chopKnife = buildKnife();
+chopKnife.position.x = -0.07; // flat part of the edge over the target
+chopRig.add(chopKnife);
 chopRig.visible = false;
 stage.add(chopRig);
 
@@ -349,170 +631,7 @@ const BLOCK_H = 0.05;
 }
 
 // ---------------------------------------------------------------------------
-// GLB models (optional, each with a primitive fallback)
-// ---------------------------------------------------------------------------
-const gltfLoader = new GLTFLoader();
-const draco = new DRACOLoader();
-draco.setDecoderPath(DRACO_PATH);
-gltfLoader.setDRACOLoader(draco);
-
-const modelCache = new Map();
-function loadGLB(name) {
-  if (!modelCache.has(name)) {
-    const load = gltfLoader.loadAsync(`./models/${name}.glb`).then((g) => g.scene);
-    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), MODEL_TIMEOUT_MS));
-    modelCache.set(name, Promise.race([load, timeout]));
-  }
-  return modelCache.get(name).then((root) => root.clone(true));
-}
-
-/** Scales a model uniformly so it fits inside `fit` (any axis may be omitted), sits on y=0, centred in xz. */
-function normalize(root, fit) {
-  const box = new THREE.Box3().setFromObject(root);
-  const size = box.getSize(new THREE.Vector3());
-  const ratios = ['x', 'y', 'z'].filter((a) => fit[a] && size[a] > 0).map((a) => fit[a] / size[a]);
-  const s = ratios.length ? Math.min(...ratios) : 1;
-  const center = box.getCenter(new THREE.Vector3());
-  root.position.set(-center.x * s, -box.min.y * s, -center.z * s);
-  root.scale.setScalar(s);
-  const wrap = new THREE.Group();
-  wrap.add(root);
-  return { wrap, size: size.multiplyScalar(s) };
-}
-
-async function placeModel(name, { fit, position, rotY = 0, parent = scene }, fallback) {
-  let obj, size;
-  try {
-    ({ wrap: obj, size } = normalize(await loadGLB(name), fit));
-    enableShadows(obj);
-  } catch {
-    obj = enableShadows(fallback());
-    size = new THREE.Box3().setFromObject(obj).getSize(new THREE.Vector3());
-  }
-  obj.position.copy(position);
-  obj.rotation.y = rotY;
-  parent.add(obj);
-  return { obj, size };
-}
-
-/**
- * Height of the dominant flat surface of `obj` (e.g. a table top), found by casting rays down over
- * its central area. More robust than the bounding box, which includes props lying on the surface.
- */
-function surfaceHeight(obj, halfX, halfZ) {
-  obj.updateMatrixWorld(true);
-  const ray = new THREE.Raycaster();
-  const down = new THREE.Vector3(0, -1, 0);
-  const counts = new Map();
-  for (let i = -3; i <= 3; i++) {
-    for (let j = -3; j <= 3; j++) {
-      ray.set(new THREE.Vector3(obj.position.x + (i / 3) * halfX, 10, obj.position.z + (j / 3) * halfZ), down);
-      const hit = ray.intersectObject(obj, true)[0];
-      if (!hit) continue;
-      const y = Math.round(hit.point.y * 200) / 200;
-      counts.set(y, (counts.get(y) || 0) + 1);
-    }
-  }
-  let best = null, bestN = 0;
-  for (const [y, n] of counts) if (n > bestN) [best, bestN] = [y, n];
-  return best;
-}
-
-// Primitive fallbacks
-function fallbackTable() {
-  const g = new THREE.Group();
-  const top = mesh(new THREE.BoxGeometry(2, 0.06, 1.5), mat.wood);
-  top.position.y = 0.75;
-  g.add(top);
-  for (const [x, z] of [[-0.9, -0.65], [0.9, -0.65], [-0.9, 0.65], [0.9, 0.65]]) {
-    const leg = mesh(new THREE.BoxGeometry(0.08, 0.72, 0.08), mat.darkWood);
-    leg.position.set(x, 0.36, z);
-    g.add(leg);
-  }
-  return g;
-}
-function fallbackRoundTable() {
-  const g = new THREE.Group();
-  const top = mesh(new THREE.CylinderGeometry(0.5, 0.5, 0.05, 16), mat.wood);
-  top.position.y = 0.675;
-  const post = mesh(new THREE.CylinderGeometry(0.05, 0.07, 0.65, 8), mat.darkWood);
-  post.position.y = 0.325;
-  const foot = mesh(new THREE.CylinderGeometry(0.25, 0.28, 0.04, 12), mat.darkWood);
-  foot.position.y = 0.02;
-  g.add(top, post, foot);
-  return g;
-}
-function fallbackRocks(n = 4, spread = 0.5, size = 0.3) {
-  const g = new THREE.Group();
-  for (let i = 0; i < n; i++) {
-    const r = size * (0.5 + 0.5 * ((i * 37) % 10) / 10);
-    const rock = mesh(new THREE.DodecahedronGeometry(r, 0), mat.rock);
-    rock.position.set(Math.cos(i * 2.4) * spread * (i / n), r * 0.6, Math.sin(i * 2.4) * spread * (i / n));
-    rock.rotation.set(i, i * 2, 0);
-    g.add(rock);
-  }
-  return g;
-}
-function fallbackBoulder() {
-  const m = new THREE.MeshStandardMaterial({ color: '#b9a27a', roughness: 1, flatShading: true });
-  const b = mesh(new THREE.IcosahedronGeometry(0.5, 0), m);
-  b.scale.set(1.2, 0.9, 1);
-  b.position.y = 0.4;
-  return new THREE.Group().add(b);
-}
-function fallbackSteppingStones() {
-  const g = new THREE.Group();
-  for (let i = 0; i < 4; i++) {
-    const s = mesh(new THREE.CylinderGeometry(0.28, 0.3, 0.08, 7), mat.rock);
-    s.position.set((i % 2) * 0.15, 0.04, i * 0.65 - 1);
-    g.add(s);
-  }
-  return g;
-}
-function fallbackFlagstone() {
-  const s = mesh(new THREE.BoxGeometry(0.85, 0.05, 0.85), new THREE.MeshStandardMaterial({ color: '#8e8a80', roughness: 1 }));
-  s.position.y = 0.025;
-  return new THREE.Group().add(s);
-}
-function fallbackLantern() {
-  const g = new THREE.Group();
-  const base = mesh(new THREE.BoxGeometry(0.1, 0.02, 0.1), mat.horn);
-  base.position.y = 0.01;
-  const glow = mesh(new THREE.BoxGeometry(0.08, 0.12, 0.08), new THREE.MeshStandardMaterial({ color: '#ffe2b0', emissive: '#ffae52', emissiveIntensity: 1.2 }));
-  glow.position.y = 0.08;
-  const roof = mesh(new THREE.ConeGeometry(0.09, 0.06, 4), mat.horn);
-  roof.position.y = 0.17;
-  roof.rotation.y = Math.PI / 4;
-  g.add(base, glow, roof);
-  return g;
-}
-
-const LANTERN_POS = new THREE.Vector3(-0.72, 0, -0.42);
-const LANTERN_H = 0.24;
-
-const modelJobs = [
-  placeModel('plank-table', { fit: { x: 2.2, y: 0.78, z: 1.7 }, position: new THREE.Vector3() }, fallbackTable).then(({ obj, size }) => {
-    tableTop = surfaceHeight(obj, size.x * 0.3, size.z * 0.25) ?? size.y;
-    onTable.position.y = tableTop;
-  }),
-  placeModel('round-table', { fit: { x: 1.1, y: 0.7, z: 1.1 }, position: new THREE.Vector3(STAGE_POS.x, 0, STAGE_POS.z) }, fallbackRoundTable).then(({ obj, size }) => {
-    stageTop = surfaceHeight(obj, size.x * 0.25, size.z * 0.25) ?? size.y;
-    stage.position.y = stageTop;
-  }),
-  placeModel('oil-lantern', { fit: { y: LANTERN_H }, position: LANTERN_POS, rotY: 0.6, parent: onTable }, fallbackLantern),
-  placeModel('stepping-stones', { fit: { z: 2.6 }, position: new THREE.Vector3(-1.75, 0, 1.0), rotY: 0.35 }, fallbackSteppingStones),
-  placeModel('rock-cluster', { fit: { y: 0.45 }, position: new THREE.Vector3(-2.3, 0, -1.15), rotY: 0.8 }, () => fallbackRocks(5, 0.6, 0.25)),
-  placeModel('rock-cluster', { fit: { y: 0.3 }, position: new THREE.Vector3(0.9, 0, -1.9), rotY: 2.1 }, () => fallbackRocks(3, 0.4, 0.18)),
-  placeModel('sandstone-boulder', { fit: { y: 0.95 }, position: new THREE.Vector3(2.9, 0, -1.7), rotY: -0.5 }, fallbackBoulder),
-  placeModel('sandstone-boulder', { fit: { y: 0.5 }, position: new THREE.Vector3(-3.2, 0, 0.4), rotY: 1.4 }, fallbackBoulder),
-  ...[-0.9, 0.05, 1.0, 1.95].map((x, i) =>
-    placeModel('flagstone-path-tile-01', { fit: { x: 0.9, z: 0.9 }, position: new THREE.Vector3(x, 0, 1.45 + (i % 2) * 0.08), rotY: i * 1.3 }, fallbackFlagstone)
-  ),
-];
-Promise.allSettled(modelJobs).then(() => draco.dispose());
-
-// ---------------------------------------------------------------------------
-// Particles (sparks + water droplets)
+// Particles (sparks, water droplets, gleam glints): pooled, allocation-free
 // ---------------------------------------------------------------------------
 function makeDotTexture() {
   const c = document.createElement('canvas');
@@ -541,6 +660,7 @@ class Particles {
     this.maxLife = new Float32Array(max).fill(1);
     this.base = new Float32Array(max * 3);
     this.cursor = 0;
+    this.alive = 0;
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(this.pos, 3).setUsage(THREE.DynamicDrawUsage));
     geo.setAttribute('color', new THREE.BufferAttribute(this.col, 4).setUsage(THREE.DynamicDrawUsage));
@@ -554,23 +674,28 @@ class Particles {
 
   emit(p, v, color, life) {
     const i = this.cursor;
+    const i3 = i * 3;
     this.cursor = (this.cursor + 1) % this.max;
-    this.pos.set([p.x, p.y, p.z], i * 3);
-    this.vel.set([v.x, v.y, v.z], i * 3);
-    this.base.set([color.r, color.g, color.b], i * 3);
+    this.pos[i3] = p.x; this.pos[i3 + 1] = p.y; this.pos[i3 + 2] = p.z;
+    this.vel[i3] = v.x; this.vel[i3 + 1] = v.y; this.vel[i3 + 2] = v.z;
+    this.base[i3] = color.r; this.base[i3 + 1] = color.g; this.base[i3 + 2] = color.b;
     this.life[i] = this.maxLife[i] = life;
+    this.alive = this.max;
   }
 
   update(dt, floorY) {
+    if (!this.alive) return; // nothing to simulate or upload
+    let alive = 0;
     for (let i = 0; i < this.max; i++) {
       if (this.life[i] <= 0) continue;
       this.life[i] -= dt;
-      const i3 = i * 3;
+      const i3 = i * 3, i4 = i * 4;
       if (this.life[i] <= 0) {
         this.pos[i3 + 1] = -999;
-        this.col[i * 4 + 3] = 0;
+        this.col[i4 + 3] = 0;
         continue;
       }
+      alive++;
       this.vel[i3 + 1] -= this.gravity * dt;
       this.pos[i3] += this.vel[i3] * dt;
       this.pos[i3 + 1] += this.vel[i3 + 1] * dt;
@@ -581,21 +706,29 @@ class Particles {
         this.vel[i3] *= 0.5;
         this.vel[i3 + 2] *= 0.5;
       }
-      const k = this.life[i] / this.maxLife[i];
-      this.col.set([this.base[i3], this.base[i3 + 1], this.base[i3 + 2], Math.min(1, k * 1.5)], i * 4);
+      this.col[i4] = this.base[i3];
+      this.col[i4 + 1] = this.base[i3 + 1];
+      this.col[i4 + 2] = this.base[i3 + 2];
+      this.col[i4 + 3] = Math.min(1, (this.life[i] / this.maxLife[i]) * 1.5);
     }
+    this.alive = alive;
     this.points.geometry.attributes.position.needsUpdate = true;
     this.points.geometry.attributes.color.needsUpdate = true;
   }
 }
 
-const sparks = new Particles(260, { size: 0.012, additive: true, gravity: 5 });
-const drops = new Particles(220, { size: 0.01, additive: false, gravity: 4 });
+// Pool sizes: <= 150 per system on mobile.
+const sparks = new Particles(isMobile ? 120 : 220, { size: 0.012, additive: true, gravity: 5 });
+const drops = new Particles(isMobile ? 100 : 180, { size: 0.01, additive: false, gravity: 4 });
+const glints = new Particles(isMobile ? 30 : 60, { size: 0.016, additive: true, gravity: 0.3 });
 const tmpV = new THREE.Vector3();
 const tmpP = new THREE.Vector3();
 const SPARK_COLORS = ['#ffd27a', '#ffb347', '#fff2c4'].map((c) => new THREE.Color(c));
+const HEAT_COLORS = [CLIMAX.heat, new THREE.Color('#fff2c4')];
 const DROP_COLOR = new THREE.Color('#cfe8ff');
-const ICE_COLOR = new THREE.Color('#e8f8ff');
+const ICE_COLOR = new THREE.Color('#E8F1F8');
+const LEAF_COLOR = new THREE.Color('#b7d38a');
+const GLINT_COLORS = [CLIMAX.gleam, new THREE.Color('#ffffff')];
 
 function burst(system, at, n, speed, colors, life) {
   for (let i = 0; i < n; i++) {
@@ -613,7 +746,7 @@ const audio = {
   // touchstart does not count on iOS Safari or Chrome.
   unlock() {
     if (this.ctx) {
-      if (this.ctx.state === 'suspended') this.ctx.resume();
+      if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
       return;
     }
     const AC = window.AudioContext || window.webkitAudioContext;
@@ -663,18 +796,47 @@ const audio = {
     src.start(t, Math.random());
     src.stop(t + duration + 0.05);
   },
-  tone(freq, duration, vol, type = 'sine') {
+  tone(freq, duration, vol, type = 'sine', delay = 0) {
     const ctx = this.ctx;
-    const t = ctx.currentTime;
+    const t = ctx.currentTime + delay;
     const o = ctx.createOscillator();
     o.type = type;
     o.frequency.value = freq;
     const g = ctx.createGain();
-    g.gain.setValueAtTime(vol, t);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol, t + 0.004);
     g.gain.exponentialRampToValueAtTime(0.001, t + duration);
     o.connect(g).connect(this.master);
     o.start(t);
     o.stop(t + duration + 0.05);
+  },
+  /** 刃鳴 (the "DING"): a struck-steel bell with inharmonic partials. Pitch climbs with the level. */
+  ding(level, segment) {
+    if (!this.ctx) return;
+    const f = 1320 * Math.pow(2, (level * 3 + (segment % 3)) / 12);
+    this.tone(f, 1.1, 0.16);
+    this.tone(f * 2.76, 0.6, 0.05);
+    this.tone(f * 5.4, 0.25, 0.025);
+  },
+  /** The whole edge reached a new stage: short rising arpeggio. */
+  chime(level) {
+    if (!this.ctx) return;
+    const root = 880 * Math.pow(2, (level * 2) / 12);
+    [0, 4, 7, 12].forEach((s, i) => this.tone(root * Math.pow(2, s / 12), 0.9, 0.12, 'sine', i * 0.07));
+  },
+  tick(high) {
+    if (!this.ctx) return;
+    this.tone(high ? 1800 : 1100, 0.06, 0.05, 'triangle');
+  },
+  touch() {
+    if (!this.ctx) return;
+    this.noiseBurst(0.06, 'bandpass', 2400, 1200, 0.18);
+    this.tone(640, 0.08, 0.05, 'triangle');
+  },
+  click() {
+    if (!this.ctx) return;
+    this.tone(520, 0.08, 0.1, 'triangle');
+    this.tone(1040, 0.05, 0.04);
   },
   slice() {
     if (!this.ctx) return;
@@ -698,6 +860,7 @@ const audio = {
 // Tweens
 // ---------------------------------------------------------------------------
 const tweens = new Set();
+let timeScale = 1; // < 1 during the test-cut slow motion
 function tween(duration, fn, ease = (t) => t) {
   return new Promise((resolve) => tweens.add({ t: 0, duration, fn, ease, resolve }));
 }
@@ -715,13 +878,14 @@ function updateTweens(dt) {
 }
 
 // ---------------------------------------------------------------------------
-// HUD
+// HUD (DOM writes only when a value changes)
 // ---------------------------------------------------------------------------
 const $ = (id) => document.getElementById(id);
 const ui = {
   sharpFill: $('sharpFill'), sharpText: $('sharpText'),
-  angleLight: $('angleLight'), angleText: $('angleText'),
-  pressFill: $('pressFill'), pressZone: $('pressZone'),
+  angleLight: $('angleLight'), angleText: $('angleText'), angleTarget: $('angleTarget'),
+  pressFill: $('pressFill'), pressZone: $('pressZone'), pressText: $('pressText'),
+  segs: $('edgeSegs'),
   hint: $('hint'), testBtn: $('testBtn'), toast: $('toast'),
   result: $('result'), resultTitle: $('resultTitle'), resultBody: $('resultBody'),
   againBtn: $('againBtn'), restartBtn: $('restartBtn'),
@@ -733,9 +897,27 @@ const sliderZone = ui.slider.querySelector('.zone');
 const angleToPct = (a) => (1 - (a - ANGLE_MIN) / (ANGLE_MAX - ANGLE_MIN)) * 100;
 ui.pressZone.style.left = `${PRESS_LO * 100}%`;
 ui.pressZone.style.width = `${(PRESS_HI - PRESS_LO) * 100}%`;
-sliderZone.style.top = `${angleToPct(TARGET_ANGLE + ANGLE_TOL)}%`;
-sliderZone.style.height = `${angleToPct(TARGET_ANGLE - ANGLE_TOL) - angleToPct(TARGET_ANGLE + ANGLE_TOL)}%`;
+sliderZone.style.top = `${angleToPct(BAND_HI)}%`;
+sliderZone.style.height = `${angleToPct(BAND_LO) - angleToPct(BAND_HI)}%`;
+ui.angleTarget.textContent = `目標 ${BAND_LO}°–${BAND_HI}°`;
+const segEls = Array.from({ length: SEGS }, () => {
+  const el = document.createElement('i');
+  el.appendChild(document.createElement('b'));
+  ui.segs.appendChild(el);
+  return el;
+});
 const DEFAULT_HINT = ui.hint.textContent;
+
+const domCache = new Map();
+function setDom(el, prop, value) {
+  let cache = domCache.get(el);
+  if (!cache) domCache.set(el, (cache = {}));
+  if (cache[prop] === value) return;
+  cache[prop] = value;
+  if (prop === 'text') el.textContent = value;
+  else if (prop === 'class') el.className = value;
+  else el.style[prop] = value;
+}
 
 let toastTimer = 0;
 function toast(text, seconds = 0.9) {
@@ -761,10 +943,39 @@ const game = {
   hintTimer: 0,
   sparkAcc: 0,
   dropAcc: 0,
+  inBand: false,
+  burr: 0,
+  edgeU: 0.5,
+  stage: 0, // lowest segment level reached across the whole edge
 };
+const seg = {
+  progress: new Float32Array(SEGS),
+  level: new Uint8Array(SEGS),
+  flash: new Float32Array(SEGS),
+  norm: new Float32Array(SEGS),
+  shown: new Int16Array(SEGS).fill(-1),
+};
+const segCenter = (i) => (i + 0.5) / SEGS;
+const segWeight = (i, u) => Math.max(0, 1 - Math.abs(segCenter(i) - u) / SEG_WINDOW);
+// Normalise so every segment (even the end ones) gains GAIN_PER_PASS per full pass.
+for (let i = 0; i < SEGS; i++) {
+  let s = 0;
+  for (let k = 0; k <= 400; k++) s += segWeight(i, k / 400) / 401;
+  seg.norm[i] = s;
+}
 
-const angleError = () => Math.abs(game.angle - TARGET_ANGLE);
-const angleOK = () => angleError() <= ANGLE_TOL;
+/** 1 inside the sweet band, smoothly less outside it, never zero (no fail state). */
+function angleEfficiency(a) {
+  const d = a < BAND_LO ? BAND_LO - a : a > BAND_HI ? a - BAND_HI : 0;
+  return d === 0 ? 1 : Math.max(0.06, 0.55 * (1 - d / 6));
+}
+/** Pressure curve: too light = slow, sweet middle, too heavy = burr and slower. */
+function pressureEfficiency(p) {
+  if (p < PRESS_LO) return 0.12 + 0.88 * Math.pow(p / PRESS_LO, 1.5);
+  if (p <= PRESS_HI) return 1;
+  return Math.max(0.3, 1 - ((p - PRESS_HI) / (1 - PRESS_HI)) * 0.7);
+}
+const angleState = () => (game.angle >= BAND_LO && game.angle <= BAND_HI ? 'good' : game.angle >= BAND_LO - 3 && game.angle <= BAND_HI + 3 ? 'near' : 'bad');
 const pressureOK = () => game.pressure >= PRESS_LO && game.pressure <= PRESS_HI;
 
 function setAngle(a) {
@@ -772,46 +983,47 @@ function setAngle(a) {
 }
 
 // ---------------------------------------------------------------------------
-// Input
+// Input (pointer events; touch-action: none on the canvas and controls)
 // ---------------------------------------------------------------------------
 let drag = null; // primary pointer: x -> stroke, y -> angle
 let second = null; // secondary pointer: y -> angle
+let sliderPointer = null;
 
 function stonePixelsPerUnit() {
-  const a = new THREE.Vector3(STATION_X - STONE_LEN / 2, STONE_TOP, 0);
-  const b = new THREE.Vector3(STATION_X + STONE_LEN / 2, STONE_TOP, 0);
-  onTable.localToWorld(a).project(camera);
-  onTable.localToWorld(b).project(camera);
-  const px = Math.abs(b.x - a.x) * 0.5 * window.innerWidth;
-  // Keep strokes comfortable on large screens: never require more than ~45% of the width per stone length.
-  return clamp(px, 200, window.innerWidth * 0.45) / STONE_LEN;
+  // A full stroke should be a comfortable thumb swipe: 35-60% of the screen width.
+  return (window.innerWidth * 0.45) / (KNIFE_TRAVEL * 2);
 }
 
 canvas.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
   if (e.pointerType === 'mouse' || audio.ctx) audio.unlock();
   if (game.mode !== 'sharpen') return;
-  e.preventDefault();
-  canvas.setPointerCapture(e.pointerId);
+  try { canvas.setPointerCapture(e.pointerId); } catch { /* pointer already gone */ }
   if (!drag) {
     drag = { id: e.pointerId, x: e.clientX, y: e.clientY, ppu: stonePixelsPerUnit() };
     game.hold = 0;
+    audio.touch();
+    knifeRoot.getWorldPosition(tmpP);
+    burst(drops, tmpP, 6, 0.25, [DROP_COLOR], 0.5);
   } else if (!second) {
     second = { id: e.pointerId, x: e.clientX, y: e.clientY };
   }
-});
+}, { passive: false });
 
 canvas.addEventListener('pointermove', (e) => {
   if (drag && e.pointerId === drag.id) {
+    e.preventDefault();
     game.knifeTargetX = clamp(game.knifeTargetX + (e.clientX - drag.x) / drag.ppu, -KNIFE_TRAVEL, KNIFE_TRAVEL);
     if (!second) setAngle(game.angle + (drag.y - e.clientY) * ANGLE_PER_PX);
     drag.x = e.clientX;
     drag.y = e.clientY;
   } else if (second && e.pointerId === second.id) {
+    e.preventDefault();
     setAngle(game.angle + (second.y - e.clientY) * ANGLE_PER_PX);
     second.x = e.clientX;
     second.y = e.clientY;
   }
-});
+}, { passive: false });
 
 function endPointer(e) {
   if (drag && e.pointerId === drag.id) {
@@ -824,6 +1036,7 @@ function endPointer(e) {
 }
 canvas.addEventListener('pointerup', endPointer);
 canvas.addEventListener('pointercancel', endPointer);
+canvas.addEventListener('lostpointercapture', endPointer);
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
@@ -834,10 +1047,16 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowUp') setAngle(game.angle + 0.5);
   if (e.key === 'ArrowDown') setAngle(game.angle - 0.5);
 });
-// iOS Safari pinch / double-tap zoom guards
-document.addEventListener('gesturestart', (e) => e.preventDefault());
+// iOS Safari: block pinch / double-tap zoom and rubber-band scrolling.
+for (const type of ['gesturestart', 'gesturechange', 'gestureend']) document.addEventListener(type, (e) => e.preventDefault());
 document.addEventListener('dblclick', (e) => e.preventDefault());
 document.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
+let lastTouchEnd = 0;
+document.addEventListener('touchend', (e) => {
+  const now = performance.now();
+  if (now - lastTouchEnd < 300 && e.target === canvas) e.preventDefault();
+  lastTouchEnd = now;
+}, { passive: false });
 ['pointerup', 'touchend', 'click', 'keydown'].forEach((type) => window.addEventListener(type, () => audio.unlock(), { passive: true }));
 
 // Secondary angle slider (works alongside the stroke finger)
@@ -846,39 +1065,69 @@ function sliderSet(e) {
   setAngle(ANGLE_MAX - ((e.clientY - r.top) / r.height) * (ANGLE_MAX - ANGLE_MIN));
 }
 ui.slider.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
   if (e.pointerType === 'mouse' || audio.ctx) audio.unlock();
   if (game.mode !== 'sharpen') return;
-  ui.slider.setPointerCapture(e.pointerId);
+  sliderPointer = e.pointerId;
+  try { ui.slider.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+  audio.tick(false);
   sliderSet(e);
-});
+}, { passive: false });
 ui.slider.addEventListener('pointermove', (e) => {
-  if (ui.slider.hasPointerCapture(e.pointerId)) sliderSet(e);
+  if (e.pointerId === sliderPointer) sliderSet(e);
 });
+for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+  ui.slider.addEventListener(type, (e) => { if (e.pointerId === sliderPointer) sliderPointer = null; });
+}
 
-ui.testBtn.addEventListener('click', () => {
-  if (game.mode === 'sharpen') runTest();
-});
-ui.againBtn.addEventListener('click', () => backToSharpen(false));
-ui.restartBtn.addEventListener('click', () => backToSharpen(true));
+function onButton(el, fn) {
+  el.addEventListener('click', () => {
+    audio.unlock();
+    audio.click();
+    fn();
+  });
+}
+onButton(ui.testBtn, () => { if (game.mode === 'sharpen') runTest(); });
+onButton(ui.againBtn, () => backToSharpen(false));
+onButton(ui.restartBtn, () => backToSharpen(true));
 
 // ---------------------------------------------------------------------------
 // Sharpening simulation
 // ---------------------------------------------------------------------------
 const contact = new THREE.Vector3();
+let lastAngleDeg = Math.round(START_ANGLE);
+
+function onSegmentLevel(i, level) {
+  seg.flash[i] = 1;
+  audio.ding(level, i);
+  // glints at that part of the edge
+  const x = edgeXAt(segCenter(i));
+  sharpKnife.localToWorld(tmpP.set(x, edgeY(x) + 0.002, 0));
+  burst(glints, tmpP, 5 + level * 2, 0.12, GLINT_COLORS, 0.5);
+  let stage = SEG_LEVELS.length;
+  for (let k = 0; k < SEGS; k++) stage = Math.min(stage, seg.level[k]);
+  if (stage > game.stage) {
+    game.stage = stage;
+    audio.chime(stage);
+    toast(stage >= SEG_LEVELS.length ? '刃鳴！全刃完成' : `全刃 第 ${stage} 段`, 1.1);
+  }
+}
 
 function updateSharpening(dt, t) {
   const down = !!drag;
   const prevX = game.knifeX;
   game.knifeX = damp(game.knifeX, game.knifeTargetX, 22, dt);
-  const v = (game.knifeX - prevX) / Math.max(dt, 1e-4);
-  game.speed = damp(game.speed, Math.abs(v), 10, dt);
+  // Speed normalised to a 0.42 m stroke so the pressure feel doesn't depend on the stone length.
+  const v = ((game.knifeX - prevX) / Math.max(dt, 1e-4)) * (0.42 / (KNIFE_TRAVEL * 2));
+  // Rise fast, fall slowly: the brief stop at each stroke reversal shouldn't knock pressure out of the zone.
+  game.speed = damp(game.speed, Math.abs(v), Math.abs(v) > game.speed ? 10 : 2.5, dt);
 
   // Pressure: leaning in while held, plus stroke speed.
   game.hold = down ? Math.min(1, game.hold + dt * 2.5) : 0;
-  const targetPressure = down ? 0.2 * game.hold + game.speed * 0.8 : 0;
-  game.pressure = damp(game.pressure, clamp(targetPressure, 0, 1), down ? 6 : 4, dt);
+  const targetPressure = down ? 0.25 * game.hold + game.speed * 0.7 : 0;
+  game.pressure = damp(game.pressure, clamp(targetPressure, 0, 1), down ? 5 : 4, dt);
 
-  const grinding = down && game.speed > 0.05;
+  const grinding = down && game.speed > 0.04;
   if (grinding) {
     // Hands are never perfectly steady: a little drift the player must correct.
     setAngle(game.angle + (Math.sin(t * 1.3) + Math.sin(t * 2.9 + 1)) * 0.9 * dt);
@@ -887,32 +1136,62 @@ function updateSharpening(dt, t) {
     game.wet = Math.max(0, game.wet - dt * 0.04);
   }
 
-  if (grinding && angleOK() && pressureOK()) {
-    const quality = 1 - (angleError() / ANGLE_TOL) * 0.5;
-    game.sharpness = Math.min(1, game.sharpness + dt * 0.075 * quality * (1 - game.sharpness * 0.45));
-  } else if (grinding && (angleError() > 7 || game.pressure > 0.88)) {
-    game.sharpness = Math.max(0, game.sharpness - dt * 0.025);
+  // Edge coverage: the part of the edge on the stone follows the stroke position.
+  const prevU = game.edgeU;
+  game.edgeU = (game.knifeX + KNIFE_TRAVEL) / (KNIFE_TRAVEL * 2);
+  const du = Math.abs(game.edgeU - prevU);
+  game.burr = damp(game.burr, grinding && game.pressure > PRESS_HI ? 1 : 0, 3, dt);
+  if (grinding && du > 0) {
+    const eff = angleEfficiency(game.angle) * pressureEfficiency(game.pressure);
+    for (let i = 0; i < SEGS; i++) {
+      const w = segWeight(i, game.edgeU);
+      if (w <= 0) continue;
+      const p = seg.progress[i];
+      seg.progress[i] = Math.min(1, p + ((du * eff * GAIN_PER_PASS * w) / seg.norm[i]) * (1 - 0.55 * p));
+      while (seg.level[i] < SEG_LEVELS.length && seg.progress[i] >= SEG_LEVELS[seg.level[i]] - 1e-6) {
+        seg.level[i]++;
+        onSegmentLevel(i, seg.level[i]);
+      }
+    }
   }
+  let sum = 0;
+  for (let i = 0; i < SEGS; i++) sum += seg.progress[i];
+  game.sharpness = sum / SEGS;
 
-  // Knife pose
-  knifeRoot.position.x = STATION_X + game.knifeX;
-  knifeRoot.position.z = Math.sin(game.knifeX * 9) * 0.008;
+  // Angle band entry feedback, and a soft tick per degree while steering outside it
+  const inBand = angleState() === 'good';
+  if (inBand !== game.inBand) {
+    game.inBand = inBand;
+    if (inBand) audio.tick(true);
+  }
+  const deg = Math.round(game.angle);
+  if (deg !== lastAngleDeg && !inBand && (drag || sliderPointer !== null)) audio.tick(false);
+  lastAngleDeg = deg;
+
+  // Knife pose: the contact point on the edge rides the stone; the belly rocks onto it.
+  const ex = edgeXAt(game.edgeU);
+  knifeRoot.position.x = STATION_X + game.knifeX * 0.75;
+  knifeRoot.position.z = Math.sin(game.knifeX * 18) * 0.004;
   knifeTilt.rotation.x = THREE.MathUtils.degToRad(90 - game.angle);
-  mat.blade.roughness = lerp(0.6, 0.05, game.sharpness);
+  knifeContact.rotation.z = -Math.atan(edgeSlope(ex));
+  sharpKnife.position.set(-ex, -edgeY(ex), 0);
+  setKnifeFinish(game.sharpness);
   mat.stoneTop.roughness = lerp(0.85, 0.3, game.wet);
+  mat.stoneTop.color.lerpColors(STONE_DRY, STONE_WET, game.wet);
 
   // Particles at the contact point
   knifeRoot.getWorldPosition(contact);
   if (grinding) {
     const dirX = Math.sign(v) || 1;
-    game.dropAcc += dt * game.speed * 90;
+    game.dropAcc += dt * game.speed * 70;
     while (game.dropAcc >= 1) {
       game.dropAcc -= 1;
-      tmpP.copy(contact).add(tmpV.set((Math.random() - 0.5) * 0.12, 0.002, (Math.random() - 0.5) * 0.08));
+      tmpP.copy(contact).add(tmpV.set((Math.random() - 0.5) * 0.08, 0.002, (Math.random() - 0.5) * 0.05));
       tmpV.set(dirX * (0.2 + Math.random() * 0.5) * game.speed * 2, 0.3 + Math.random() * 0.6, (Math.random() - 0.5) * 0.4);
       drops.emit(tmpP, tmpV, DROP_COLOR, 0.6 + Math.random() * 0.4);
     }
-    game.sparkAcc += dt * Math.max(0, game.pressure - 0.3) * game.speed * 260;
+    // Sparks mostly mean "too much pressure" (burr): a readable warning.
+    game.sparkAcc += dt * (Math.max(0, game.pressure - PRESS_HI) * 600 + Math.max(0, game.pressure - 0.3) * 30) * game.speed;
     while (game.sparkAcc >= 1) {
       game.sparkAcc -= 1;
       tmpV.set(-dirX * (0.6 + Math.random() * 1.2), 0.4 + Math.random() * 1.1, (Math.random() - 0.5) * 0.8);
@@ -920,69 +1199,119 @@ function updateSharpening(dt, t) {
     }
   }
 
-  audio.setGrind(grinding ? Math.min(0.55, game.speed * 0.9) * (0.35 + game.pressure) : 0, 500 + game.speed * 1600 + game.pressure * 600);
+  // Grind sound: brighter and steadier in the band, rougher with a burr.
+  audio.setGrind(grinding ? Math.min(0.55, game.speed * 0.9) * (0.35 + game.pressure) * (inBand ? 1 : 0.7) : 0,
+    (500 + game.speed * 1600 + game.pressure * 400) * (inBand ? 1.25 : 0.9) * (1 - game.burr * 0.35));
 
-  // Coaching hint (throttled to avoid flicker)
+  // Coaching hint (throttled to avoid flicker); gentle tone, never "fail".
   game.hintTimer -= dt;
   if (game.hintTimer <= 0) {
     game.hintTimer = 0.3;
     let msg = DEFAULT_HINT;
     if (down) {
-      if (game.angle > TARGET_ANGLE + ANGLE_TOL) msg = '角度太陡 ↓ 手指往下';
-      else if (game.angle < TARGET_ANGLE - ANGLE_TOL) msg = '角度太平 ↑ 手指往上';
-      else if (!grinding) msg = '角度正確，來回推拉！';
-      else if (game.pressure < PRESS_LO) msg = '壓力太輕，推快一點';
-      else if (game.pressure > PRESS_HI) msg = '壓力太重，放慢一點';
-      else msg = '很好！保持角度與節奏';
+      if (game.angle > BAND_HI) msg = '角度稍陡 ↓ 手指往下一點';
+      else if (game.angle < BAND_LO) msg = '角度稍平 ↑ 手指往上一點';
+      else if (!grinding) msg = '角度剛好，左右來回推！';
+      else if (game.pressure < PRESS_LO) msg = '壓力偏輕，推快一點';
+      else if (game.pressure > PRESS_HI) msg = '太用力會起毛邊，放慢一點';
+      else msg = '很好！刃口在發亮';
+    } else if (game.sharpness > 0.03) {
+      msg = '推到左右兩端，讓整條刃口都亮起來';
     }
-    if (ui.hint.textContent !== msg) ui.hint.textContent = msg;
+    setDom(ui.hint, 'text', msg);
   }
+}
+
+function setKnifeFinish(s) {
+  mat.blade.roughness = lerp(0.38, 0.12, s);
+}
+
+// Gleam line colours (both faces): segment progress + completion flash + a slow highlight sweep.
+const gleamColors = gleamGeo.attributes.color;
+const gleamInfo = gleamGeo.userData.info;
+function updateGleam(dt, t) {
+  for (let i = 0; i < SEGS; i++) seg.flash[i] = Math.max(0, seg.flash[i] - dt * 1.6);
+  const arr = gleamColors.array;
+  const sweep = ((t * 0.35) % 1.6) - 0.3;
+  const g = CLIMAX.gleam;
+  for (let k = 0, n = gleamColors.count; k < n; k++) {
+    const s = gleamInfo[k * 3], row = gleamInfo[k * 3 + 1], x = gleamInfo[k * 3 + 2];
+    const p = seg.progress[s];
+    const lit = seg.level[s] > 0 ? 0.3 + 0.7 * p : p * 0.6; // first level = clearly visible
+    const shimmer = seg.level[s] > 0 ? 1 + 0.7 * Math.max(0, 1 - Math.abs(x - sweep) * 8) : 1;
+    const b = (lit * shimmer + seg.flash[s] * 1.5) * (1 - row * 0.85);
+    arr[k * 3] = g.r * b;
+    arr[k * 3 + 1] = g.g * b;
+    arr[k * 3 + 2] = g.b * b;
+  }
+  gleamColors.needsUpdate = true;
 }
 
 function updateHUD() {
   const s = Math.round(game.sharpness * 100);
-  ui.sharpFill.style.width = `${s}%`;
-  ui.sharpText.textContent = `${s}%`;
-  const err = angleError();
-  ui.angleLight.className = err <= ANGLE_TOL ? 'good' : err <= ANGLE_TOL * 2 ? 'near' : '';
-  ui.angleText.textContent = `${game.angle.toFixed(1)}°`;
-  ui.pressFill.style.width = `${Math.round(game.pressure * 100)}%`;
-  ui.pressFill.className = `fill${pressureOK() ? ' good' : game.pressure > PRESS_HI ? ' high' : ''}`;
-  sliderThumb.style.top = `${angleToPct(game.angle)}%`;
+  setDom(ui.sharpFill, 'width', `${s}%`);
+  setDom(ui.sharpText, 'text', `${s}%`);
+  const st = angleState();
+  setDom(ui.angleLight, 'class', st === 'bad' ? '' : st);
+  setDom(ui.angleText, 'class', st === 'bad' ? '' : st);
+  setDom(ui.angleText, 'text', `${game.angle.toFixed(1)}°`);
+  setDom(ui.pressFill, 'width', `${Math.round(game.pressure * 100)}%`);
+  setDom(ui.pressFill, 'class', `fill${pressureOK() ? ' good' : game.pressure > PRESS_HI ? ' high' : ''}`);
+  setDom(ui.pressText, 'text', !drag ? '' : pressureOK() ? '剛好' : game.pressure > PRESS_HI ? '太重' : '太輕');
+  setDom(sliderThumb, 'top', `${angleToPct(game.angle)}%`);
+  setDom(sliderThumb, 'class', `thumb ${st}`);
+  const cur = drag ? Math.min(SEGS - 1, Math.floor(game.edgeU * SEGS)) : -1;
+  for (let i = 0; i < SEGS; i++) {
+    const pct = Math.round(seg.progress[i] * 20) * 5;
+    if (seg.shown[i] !== pct) {
+      seg.shown[i] = pct;
+      segEls[i].firstChild.style.height = `${pct}%`;
+    }
+    setDom(segEls[i], 'class', `l${seg.level[i]}${i === cur ? ' cur' : ''}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Test-cut targets
 // ---------------------------------------------------------------------------
-/** Clamps every vertex to one side of the x=0 plane: a cheap, exact "cut" for flat-shaded meshes. */
-function halfGeometry(geo, side) {
-  const g = geo.clone();
+const WHITE = new THREE.Color(1, 1, 1);
+/**
+ * Clamps every vertex to one side of the x=0 plane: a cheap, exact "cut" for flat-shaded meshes.
+ * Vertices that land on the cut plane get `cutColor` (vertex colours), so the cut face reads clearly.
+ */
+function halfGeometry(geo, side, cutColor) {
+  const g = geo.index ? geo.toNonIndexed() : geo.clone();
   const p = g.attributes.position;
-  for (let i = 0; i < p.count; i++) p.setX(i, side < 0 ? Math.min(p.getX(i), 0) : Math.max(p.getX(i), 0));
+  const col = new Float32Array(p.count * 3);
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i);
+    const cut = side < 0 ? x >= 0 : x <= 0;
+    p.setX(i, cut ? 0 : x);
+    (cut ? cutColor : WHITE).toArray(col, i * 3);
+  }
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
   g.computeVertexNormals();
   return g;
-}
-
-function hash3(x, y, z) {
-  const s = Math.sin(x * 127.1 + y * 311.7 + z * 74.7) * 43758.5453;
-  return s - Math.floor(s);
 }
 
 const TARGET_DEFS = {
   paper: () => ({
     geo: new THREE.BoxGeometry(0.2, 0.24, 0.003, 2, 1, 1).translate(0, 0.12, 0),
-    material: new THREE.MeshStandardMaterial({ color: '#f4efe2', roughness: 0.9, side: THREE.DoubleSide }),
-    halfWidth: 0.1, slide: 0.01, hop: 0, topple: 1.45, twist: 0.15, fx: 'paper',
+    material: new THREE.MeshStandardMaterial({ color: '#F7F7F2', roughness: 0.9, side: THREE.DoubleSide, vertexColors: true }),
+    cut: new THREE.Color('#ffffff'),
+    halfWidth: 0.1, slide: 0.01, hop: 0, topple: 1.45, twist: 0.15, fx: 'paper', weight: 0,
   }),
   bamboo: () => ({
     geo: new THREE.CylinderGeometry(0.032, 0.032, 0.36, 9, 6).rotateZ(Math.PI / 2).translate(0, 0.032, 0),
-    material: new THREE.MeshStandardMaterial({ color: '#7fa64a', roughness: 0.55, flatShading: true }),
-    halfWidth: 0.18, slide: 0.1, hop: 0.07, topple: 0, twist: 0.6, fx: 'wood',
+    material: flat(shade(PALETTES.day.leaf, 1.3), 0.55, { vertexColors: true }),
+    cut: new THREE.Color('#e9f2c4'), // light green-cream fibre
+    halfWidth: 0.18, slide: 0.1, hop: 0.07, topple: 0, twist: 0.6, fx: 'wood', weight: 1,
   }),
   iron: () => ({
     geo: new THREE.BoxGeometry(0.32, 0.045, 0.055, 2, 1, 1).translate(0, 0.0225, 0),
-    material: new THREE.MeshStandardMaterial({ color: '#5d6166', metalness: 0.85, roughness: 0.38, flatShading: true }),
-    halfWidth: 0.16, slide: 0.06, hop: 0.04, topple: 0, twist: 0.3, fx: 'metal',
+    material: new THREE.MeshStandardMaterial({ color: '#5d6166', metalness: 0.85, roughness: 0.38, flatShading: true, vertexColors: true }),
+    cut: shade(CLIMAX.heat, 2.4), // hot glow at the cut
+    halfWidth: 0.16, slide: 0.06, hop: 0.04, topple: 0, twist: 0.3, fx: 'metal', weight: 2,
   }),
   ice: () => {
     const geo = new THREE.IcosahedronGeometry(0.14, 1);
@@ -994,8 +1323,9 @@ const TARGET_DEFS = {
     }
     return {
       geo,
-      material: new THREE.MeshPhysicalMaterial({ color: '#cdeeff', roughness: 0.12, metalness: 0, clearcoat: 1, flatShading: true, sheen: 0.4, sheenColor: '#ffffff' }),
-      halfWidth: 0.14, slide: 0.05, hop: 0, topple: 0.3, twist: 0.2, fx: 'ice',
+      material: new THREE.MeshPhysicalMaterial({ color: '#9FB7C9', roughness: 0.12, metalness: 0, clearcoat: 1, flatShading: true, sheen: 0.4, sheenColor: '#ffffff', vertexColors: true }),
+      cut: new THREE.Color('#d8f0ff').multiplyScalar(1.6), // bright blue
+      halfWidth: 0.14, slide: 0.05, hop: 0, topple: 0.3, twist: 0.2, fx: 'ice', weight: 3,
     };
   },
 };
@@ -1008,14 +1338,14 @@ function buildTarget(key) {
     // Pivot at the outer bottom edge so halves topple outward.
     const pivot = new THREE.Group();
     pivot.position.x = side * def.halfWidth;
-    const m = mesh(halfGeometry(def.geo, side), def.material);
+    const m = mesh(halfGeometry(def.geo, side, def.cut), def.material);
     m.position.x = -side * def.halfWidth;
     pivot.add(m);
     group.add(pivot);
     return { pivot, side };
   });
   if (key === 'bamboo') {
-    const nodeMat = new THREE.MeshStandardMaterial({ color: '#c4c98c', roughness: 0.6, flatShading: true });
+    const nodeMat = flat('#c4c98c', 0.6);
     halves.forEach(({ pivot, side }) => {
       const ring = mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.01, 9).rotateZ(Math.PI / 2), nodeMat);
       ring.position.set(-side * def.halfWidth + side * 0.1, 0.032, 0);
@@ -1040,7 +1370,7 @@ function disposeTarget(target) {
   target.group.traverse((o) => {
     if (o.isMesh) {
       o.geometry.dispose();
-      o.material.dispose?.();
+      if (o.material !== mat.horn) o.material.dispose();
     }
   });
 }
@@ -1050,9 +1380,31 @@ function stageWorld(local) {
 }
 
 function impactFX(fx, at, success) {
-  if (fx === 'metal' || (fx === 'ice' && !success)) burst(sparks, at, success ? 30 : 45, 1.2, SPARK_COLORS, 0.45);
-  if (fx === 'ice') burst(drops, at, 40, 0.9, [ICE_COLOR, DROP_COLOR], 0.9);
-  if (fx === 'wood' && success) burst(drops, at, 14, 0.5, [new THREE.Color('#b7d38a')], 0.6);
+  if (fx === 'metal' || (fx === 'ice' && !success)) burst(sparks, at, success ? 30 : 40, 1.2, HEAT_COLORS, 0.45);
+  if (fx === 'ice') burst(drops, at, 36, 0.9, [ICE_COLOR, DROP_COLOR], 0.9);
+  if (fx === 'wood' && success) burst(drops, at, 14, 0.5, [LEAF_COLOR], 0.6);
+  if (success) burst(glints, at, 10, 0.4, GLINT_COLORS, 0.4);
+}
+
+// Hitstop + decaying screen shake (research: cap the stop; shake goes large -> small)
+let hitstop = 0;
+let shake = 0;
+let shakeAmp = 0;
+function impact(weight, success) {
+  hitstop = Math.min(HITSTOP_MAX, success ? 0.05 + weight * 0.025 : 0.04);
+  shake = 1;
+  shakeAmp = success ? 0.006 + weight * 0.003 : 0.008;
+}
+
+const flashEl = document.getElementById('flash');
+function flash(color, opacity, ms) {
+  flashEl.style.transition = 'none';
+  flashEl.style.background = color;
+  flashEl.style.opacity = opacity;
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    flashEl.style.transition = `opacity ${ms}ms ease-out`;
+    flashEl.style.opacity = 0;
+  }));
 }
 
 async function chop(target, success) {
@@ -1066,8 +1418,15 @@ async function chop(target, success) {
   audio.whoosh();
 
   if (success) {
+    // Slow motion -> slash flash + hitstop/shake -> brief stillness -> halves separate -> normal speed.
+    timeScale = 0.15;
     await tween(0.12, (k) => (chopRig.position.y = lerp(raised, BLOCK_H, k)), easeInCubic);
+    timeScale = 1;
     audio.slice();
+    impact(target.def.weight, true);
+    flash(CLIMAX.slash, 0.75, 260);
+    if (target.def.fx === 'ice') setTimeout(() => flash(CLIMAX.accent, 0.35, 90), 40); // red: a few frames only
+    await wait(0.35);
     impactFX(target.def.fx, stageWorld(new THREE.Vector3(0, BLOCK_H + target.height * 0.5, 0)), true);
     const { slide, hop, topple, twist } = target.def;
     const pieces = tween(0.8, (k) => {
@@ -1085,8 +1444,9 @@ async function chop(target, success) {
   } else {
     await tween(0.1, (k) => (chopRig.position.y = lerp(raised, top, k)), easeInCubic);
     audio.clank();
+    impact(0, false);
     impactFX(target.def.fx === 'paper' || target.def.fx === 'wood' ? 'none' : target.def.fx, stageWorld(new THREE.Vector3(0, top, 0)), false);
-    toast('彈開！');
+    toast('彈開了');
     const baseY = target.group.position.y;
     await tween(0.7, (k) => {
       // knife bounces up with a decaying wobble; target shudders
@@ -1101,7 +1461,9 @@ async function chop(target, success) {
 
 async function runTest() {
   game.mode = 'test';
+  document.body.classList.add('cine');
   drag = second = null;
+  sliderPointer = null;
   audio.setGrind(0, 500);
   ui.testBtn.disabled = true;
   ui.slider.classList.add('hidden');
@@ -1138,10 +1500,10 @@ function showResult(passed, failedTier) {
   const pct = Math.round(game.sharpness * 100);
   ui.resultTitle.textContent = RANKS[passed.length];
   const lines = [`鋒利度 <b>${pct}%</b>`];
-  lines.push(passed.length ? `成功斬斷：<b>${passed.map((p) => p.name).join('、')}</b>` : '連紙都切不開…');
+  lines.push(passed.length ? `成功斬斷：<b>${passed.map((p) => p.name).join('、')}</b>` : '這次連紙都還切不開');
   if (failedTier) {
-    lines.push(`${failedTier.name}：刀被彈開（需要 ${Math.round(failedTier.need * 100)}%）`);
-    lines.push('提示：保持 15° 並讓壓力停在綠區。');
+    lines.push(`${failedTier.name}：需要 ${Math.round(failedTier.need * 100)}%，再磨一下就好`);
+    lines.push(`再穩一點：角度保持 ${BAND_LO}°–${BAND_HI}°，讓整條刃口都亮起來。`);
   } else {
     lines.push('連冰山都一刀兩斷，傳說中的名匠！');
   }
@@ -1151,8 +1513,13 @@ function showResult(passed, failedTier) {
 
 async function backToSharpen(reset) {
   ui.result.classList.remove('show');
+  document.body.classList.remove('cine');
   if (reset) {
+    seg.progress.fill(0);
+    seg.level.fill(0);
+    seg.flash.fill(0);
     game.sharpness = 0;
+    game.stage = 0;
     setAngle(START_ANGLE);
     game.knifeX = game.knifeTargetX = 0;
     game.wet = 0;
@@ -1170,7 +1537,7 @@ async function backToSharpen(reset) {
 // Camera framing (fits both portrait phones and landscape screens)
 // ---------------------------------------------------------------------------
 let camBlend = 0; // 0 = whetstone view, 1 = test stage view
-const SHARPEN_DIR = new THREE.Vector3(0.12, 0.72, 0.68).normalize();
+const SHARPEN_DIR = new THREE.Vector3(0.12, 0.8, 0.6).normalize();
 const STAGE_DIR = new THREE.Vector3(0.62, 0.42, 0.66).normalize();
 
 function fitDistance(halfW, halfH) {
@@ -1184,20 +1551,46 @@ const camB = new THREE.Vector3();
 const lookA = new THREE.Vector3();
 const lookB = new THREE.Vector3();
 
-function updateCamera(t) {
+function updateCamera(t, realDt) {
   const portrait = camera.aspect < 1;
   // Look slightly above the stone on portrait so the HUD doesn't cover it.
-  lookA.set(STATION_X + (portrait ? 0.035 : 0), tableTop + (portrait ? 0.07 : 0.04), 0.02);
-  camA.copy(lookA).addScaledVector(SHARPEN_DIR, fitDistance(portrait ? 0.34 : 0.55, portrait ? 0.18 : 0.3));
-  lookB.set(stage.position.x, stageTop + 0.14, stage.position.z);
+  lookA.set(STATION_X + (portrait ? 0.09 : 0.06), TABLE_TOP + (portrait ? 0.05 : 0.03), 0.04);
+  camA.copy(lookA).addScaledVector(SHARPEN_DIR, fitDistance(portrait ? 0.26 : 0.46, portrait ? 0.16 : 0.26));
+  lookB.set(stage.position.x, STAGE_TOP + 0.14, stage.position.z);
   camB.copy(lookB).addScaledVector(STAGE_DIR, fitDistance(portrait ? 0.3 : 0.45, portrait ? 0.3 : 0.38));
 
   camera.position.lerpVectors(camA, camB, camBlend);
-  camera.position.x += Math.sin(t * 0.5) * 0.012;
-  camera.position.y += Math.sin(t * 0.37 + 1) * 0.008;
-  camera.position.z += Math.cos(t * 0.41) * 0.008;
+  camera.position.x += Math.sin(t * 0.5) * 0.006;
+  camera.position.y += Math.sin(t * 0.37 + 1) * 0.004;
+  camera.position.z += Math.cos(t * 0.41) * 0.004;
+  if (shake > 0) {
+    const a = shakeAmp * shake * shake; // decays large -> small
+    camera.position.x += (Math.random() - 0.5) * 2 * a;
+    camera.position.y += (Math.random() - 0.5) * 2 * a;
+    shake = Math.max(0, shake - realDt / 0.35);
+  }
   lookA.lerp(lookB, camBlend);
   camera.lookAt(lookA);
+}
+
+// Day/dusk palette blends toward the climax palette as the camera moves to the test stage.
+rim.position.set(STAGE_POS.x - 1.2, 2.2, STAGE_POS.z - 1.6);
+rim.target.position.copy(STAGE_POS);
+function updateAtmosphere(t) {
+  const k = camBlend;
+  skyMat.uniforms.uDark.value = k * 0.97;
+  scene.fog.color.copy(P.skyBottom).lerp(CLIMAX.bg, k);
+  scene.fog.near = lerp(5, 1.4, k);
+  scene.fog.far = lerp(14, 4.2, k);
+  hemi.intensity = lerp(P.hemiI, 0.25, k);
+  hemi.color.copy(P.hemiSky).lerp(CLIMAX.ambient, k);
+  hemi.groundColor.copy(P.hemiGround).lerp(CLIMAX.bg, k);
+  sun.intensity = lerp(P.sunI, 0.2, k);
+  rim.intensity = lerp(0, 3.2, k);
+  scene.environmentIntensity = lerp(P.envI, 0.3, k);
+  const flicker = 1 + Math.sin(t * 9) * 0.07 + Math.sin(t * 23) * 0.04;
+  lanternLight.intensity = P.lanternI * flicker * (1 - k * 0.85);
+  lanternLight.position.set(LANTERN_POS.x, TABLE_TOP + LANTERN_H * 0.45, LANTERN_POS.z);
 }
 
 function onResize() {
@@ -1205,37 +1598,91 @@ function onResize() {
   camera.aspect = w / h;
   camera.fov = camera.aspect < 1 ? 55 : 45;
   camera.updateProjectionMatrix();
+  renderer.setPixelRatio(pixelRatio());
   renderer.setSize(w, h);
+  if (drag) drag.ppu = stonePixelsPerUnit();
 }
 window.addEventListener('resize', onResize);
+window.addEventListener('orientationchange', () => setTimeout(onResize, 250));
+window.visualViewport?.addEventListener('resize', onResize);
 onResize();
 
-document.addEventListener('visibilitychange', () => {
-  if (!audio.ctx) return;
-  if (document.hidden) audio.ctx.suspend();
-  else audio.ctx.resume();
-});
+// Debug: ?demo=0.8 starts with that sharpness and runs the test cut immediately.
+if (params.has('demo')) {
+  seg.progress.fill(clamp(parseFloat(params.get('demo')) || 0, 0, 1));
+  for (let i = 0; i < SEGS; i++) seg.level[i] = SEG_LEVELS.filter((l) => seg.progress[i] >= l).length;
+  game.sharpness = seg.progress[0];
+  game.stage = seg.level[0];
+  setKnifeFinish(game.sharpness);
+  runTest();
+}
 
 // ---------------------------------------------------------------------------
-// Main loop
+// Main loop (paused while the tab is hidden)
 // ---------------------------------------------------------------------------
 const clock = new THREE.Clock();
-renderer.setAnimationLoop(() => {
-  const dt = Math.min(clock.getDelta(), 0.05);
+const FPS_N = 60;
+const frameTimes = new Float32Array(FPS_N);
+let frameIdx = 0, frameCount = 0, frameSum = 0;
+window.__fps = 0;
+
+function frame() {
+  const rawDt = clock.getDelta();
+  const realDt = Math.min(rawDt, 0.05); // simulation step (clamped after stalls)
   const t = clock.elapsedTime;
 
-  updateTweens(dt);
+  // Rolling FPS average from the true frame time (allocation-free ring buffer)
+  frameSum += rawDt - frameTimes[frameIdx];
+  frameTimes[frameIdx] = rawDt;
+  frameIdx = (frameIdx + 1) % FPS_N;
+  frameCount = Math.min(FPS_N, frameCount + 1);
+  window.__fps = frameSum > 0 ? Math.round((frameCount / frameSum) * 10) / 10 : 0;
+
+  // Hitstop: the world nearly freezes (still creeping), then resumes.
+  let dt = realDt;
+  if (hitstop > 0) {
+    hitstop -= realDt;
+    dt = realDt * 0.05;
+  }
+
+  updateTweens(dt * timeScale);
   if (game.mode === 'sharpen') updateSharpening(dt, t);
   else game.pressure = damp(game.pressure, 0, 6, dt);
+  updateGleam(dt, t);
   updateHUD();
+  updateAtmosphere(t);
 
-  lanternLight.position.set(LANTERN_POS.x, tableTop + LANTERN_H * 0.55, LANTERN_POS.z);
-  lanternLight.intensity = 1.1 + Math.sin(t * 9) * 0.08 + Math.sin(t * 23) * 0.05;
-
-  const floorY = camBlend > 0.5 ? stageTop + BLOCK_H : tableTop;
-  sparks.update(dt, floorY);
-  drops.update(dt, floorY);
+  const floorY = camBlend > 0.5 ? STAGE_TOP + BLOCK_H : TABLE_TOP;
+  sparks.update(dt * timeScale, floorY);
+  drops.update(dt * timeScale, floorY);
+  glints.update(dt * timeScale, -10);
   bamboo.update(t);
-  updateCamera(t);
+  updateCamera(t, realDt);
   renderer.render(scene, camera);
+}
+renderer.setAnimationLoop(frame);
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    renderer.setAnimationLoop(null);
+    audio.setGrind(0, 500);
+    audio.ctx?.suspend();
+  } else {
+    clock.getDelta(); // drop the hidden interval
+    renderer.setAnimationLoop(frame);
+    audio.ctx?.resume();
+  }
 });
+
+// ---------------------------------------------------------------------------
+// Test hooks
+// ---------------------------------------------------------------------------
+window.__game = {
+  get sharpness() { return game.sharpness; },
+  get angle() { return game.angle; },
+  get pressure() { return game.pressure; },
+  get phase() { return game.mode; },
+  get segments() { return Array.from(seg.progress); },
+  get stage() { return game.stage; },
+  band: [BAND_LO, BAND_HI],
+};
