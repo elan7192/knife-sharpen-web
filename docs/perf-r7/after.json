@@ -1,0 +1,267 @@
+{
+  "label": "after",
+  "device": "iPhone 13 (Playwright emulation, 390x664 CSS px, DPR 3)",
+  "note": "SwiftShader software rendering: fps is not representative of a real iPhone 13",
+  "scenes": {
+    "title": {
+      "frames": 8,
+      "drawCallsMedian": 44,
+      "drawCallsMax": 44,
+      "trianglesMedian": 29541,
+      "pointsMedian": 12,
+      "jsMsMedian": 3.5,
+      "jsMsP99": 5,
+      "swiftshaderFpsMedian": 2.5,
+      "pageFps": {
+        "current": 1.6,
+        "median": 2.3,
+        "p1low": 0.3,
+        "worstMs": 3587.9,
+        "frames": 16,
+        "seconds": 10.3
+      },
+      "info": {
+        "calls": 30,
+        "triangles": 22563,
+        "points": 12,
+        "geometries": 32,
+        "textures": 4,
+        "programs": 24,
+        "pixelRatio": 1.5,
+        "shadowMap": 1024,
+        "batched": {
+          "meshesBefore": 23,
+          "meshesAfter": 14
+        },
+        "quality": {
+          "index": 2,
+          "name": "高",
+          "auto": true,
+          "cap": 3,
+          "level": {
+            "name": "高",
+            "dpr": 1.5,
+            "shadow": 1024,
+            "shadowEvery": 1,
+            "particles": 1,
+            "dust": 1,
+            "bambooEvery": 1,
+            "hudBlur": true
+          },
+          "log": []
+        }
+      }
+    },
+    "sharpen-idle": {
+      "frames": 8,
+      "drawCallsMedian": 43,
+      "drawCallsMax": 43,
+      "trianglesMedian": 29531,
+      "pointsMedian": 12,
+      "jsMsMedian": 1.7,
+      "jsMsP99": 2.3,
+      "swiftshaderFpsMedian": 2.4,
+      "pageFps": {
+        "current": 2,
+        "median": 2.3,
+        "p1low": 0.3,
+        "worstMs": 3587.9,
+        "frames": 36,
+        "seconds": 18.9
+      },
+      "info": {
+        "calls": 29,
+        "triangles": 22553,
+        "points": 12,
+        "geometries": 32,
+        "textures": 4,
+        "programs": 24,
+        "pixelRatio": 1.5,
+        "shadowMap": 1024,
+        "batched": {
+          "meshesBefore": 23,
+          "meshesAfter": 14
+        },
+        "quality": {
+          "index": 2,
+          "name": "高",
+          "auto": true,
+          "cap": 3,
+          "level": {
+            "name": "高",
+            "dpr": 1.5,
+            "shadow": 1024,
+            "shadowEvery": 1,
+            "particles": 1,
+            "dust": 1,
+            "bambooEvery": 1,
+            "hudBlur": true
+          },
+          "log": []
+        }
+      }
+    },
+    "sharpen-grind": {
+      "frames": 576,
+      "drawCallsMedian": 45,
+      "drawCallsMax": 46,
+      "trianglesMedian": 29531,
+      "pointsMedian": 226,
+      "jsMsMedian": 1.9,
+      "jsMsP99": 6.4,
+      "swiftshaderFpsMedian": 3.3,
+      "pageFps": {
+        "current": 4.8,
+        "median": 3.2,
+        "p1low": 1.9,
+        "worstMs": 3587.9,
+        "frames": 621,
+        "seconds": 203
+      },
+      "info": {
+        "calls": 32,
+        "triangles": 22563,
+        "points": 250,
+        "geometries": 35,
+        "textures": 4,
+        "programs": 24,
+        "pixelRatio": 1,
+        "shadowMap": 512,
+        "batched": {
+          "meshesBefore": 23,
+          "meshesAfter": 14
+        },
+        "quality": {
+          "index": 0,
+          "name": "低",
+          "auto": true,
+          "cap": 0,
+          "level": {
+            "name": "低",
+            "dpr": 1,
+            "shadow": 512,
+            "shadowEvery": 2,
+            "particles": 0.45,
+            "dust": 0,
+            "bambooEvery": 2,
+            "hudBlur": false
+          },
+          "log": [
+            {
+              "t": 94708,
+              "from": 2,
+              "to": 1,
+              "why": "down: median 2.3 / 1% 1.9 fps"
+            },
+            {
+              "t": 161194,
+              "from": 1,
+              "to": 0,
+              "why": "down: median 3.3 / 1% 2.5 fps"
+            }
+          ]
+        }
+      },
+      "errors": []
+    },
+    "sharpen-day": {
+      "frames": 7,
+      "drawCallsMedian": 44,
+      "drawCallsMax": 44,
+      "trianglesMedian": 29541,
+      "pointsMedian": 12,
+      "jsMsMedian": 2.3,
+      "jsMsP99": 3.1,
+      "swiftshaderFpsMedian": 2.5,
+      "pageFps": {
+        "current": 1.8,
+        "median": 2.5,
+        "p1low": 0.3,
+        "worstMs": 3106.5,
+        "frames": 17,
+        "seconds": 9.8
+      },
+      "info": {
+        "calls": 30,
+        "triangles": 22563,
+        "points": 12,
+        "geometries": 32,
+        "textures": 4,
+        "programs": 24,
+        "pixelRatio": 1.5,
+        "shadowMap": 1024,
+        "batched": {
+          "meshesBefore": 23,
+          "meshesAfter": 14
+        },
+        "quality": {
+          "index": 2,
+          "name": "高",
+          "auto": true,
+          "cap": 3,
+          "level": {
+            "name": "高",
+            "dpr": 1.5,
+            "shadow": 1024,
+            "shadowEvery": 1,
+            "particles": 1,
+            "dust": 1,
+            "bambooEvery": 1,
+            "hudBlur": true
+          },
+          "log": []
+        }
+      }
+    },
+    "cut-iceberg": {
+      "frames": 83,
+      "drawCallsMedian": 43,
+      "drawCallsMax": 51,
+      "trianglesMedian": 29971,
+      "pointsMedian": 12,
+      "jsMsMedian": 1.2,
+      "jsMsP99": 80.8,
+      "swiftshaderFpsMedian": 3.3,
+      "pageFps": {
+        "current": 2.8,
+        "median": 2.7,
+        "p1low": 0.3,
+        "worstMs": 3106.5,
+        "frames": 90,
+        "seconds": 36.9
+      },
+      "info": {
+        "calls": 31,
+        "triangles": 20107,
+        "points": 142,
+        "geometries": 41,
+        "textures": 6,
+        "programs": 24,
+        "pixelRatio": 1.5,
+        "shadowMap": 1024,
+        "batched": {
+          "meshesBefore": 23,
+          "meshesAfter": 14
+        },
+        "quality": {
+          "index": 2,
+          "name": "高",
+          "auto": true,
+          "cap": 3,
+          "level": {
+            "name": "高",
+            "dpr": 1.5,
+            "shadow": 1024,
+            "shadowEvery": 1,
+            "particles": 1,
+            "dust": 1,
+            "bambooEvery": 1,
+            "hudBlur": true
+          },
+          "log": []
+        }
+      },
+      "errors": []
+    }
+  }
+}

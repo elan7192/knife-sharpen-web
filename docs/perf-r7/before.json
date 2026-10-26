@@ -1,0 +1,69 @@
+{
+  "label": "before",
+  "device": "iPhone 13 (Playwright emulation, 390x664 CSS px, DPR 3)",
+  "note": "SwiftShader software rendering: fps is not representative of a real iPhone 13",
+  "scenes": {
+    "title": {
+      "frames": 8,
+      "drawCallsMedian": 66,
+      "drawCallsMax": 66,
+      "trianglesMedian": 36983,
+      "pointsMedian": 262,
+      "jsMsMedian": 2.4,
+      "jsMsP99": 4.3,
+      "swiftshaderFpsMedian": 2.7,
+      "pageFps": 1.7,
+      "info": null
+    },
+    "sharpen-idle": {
+      "frames": 8,
+      "drawCallsMedian": 65,
+      "drawCallsMax": 65,
+      "trianglesMedian": 36973,
+      "pointsMedian": 262,
+      "jsMsMedian": 1.4,
+      "jsMsP99": 2.9,
+      "swiftshaderFpsMedian": 2.5,
+      "pageFps": 2,
+      "info": null
+    },
+    "sharpen-grind": {
+      "frames": 577,
+      "drawCallsMedian": 65,
+      "drawCallsMax": 66,
+      "trianglesMedian": 36973,
+      "pointsMedian": 262,
+      "jsMsMedian": 2,
+      "jsMsP99": 7.5,
+      "swiftshaderFpsMedian": 2.4,
+      "pageFps": 2.4,
+      "info": null,
+      "errors": []
+    },
+    "sharpen-day": {
+      "frames": 7,
+      "drawCallsMedian": 66,
+      "drawCallsMax": 66,
+      "trianglesMedian": 36983,
+      "pointsMedian": 262,
+      "jsMsMedian": 2.3,
+      "jsMsP99": 2.7,
+      "swiftshaderFpsMedian": 2.4,
+      "pageFps": 1.8,
+      "info": null
+    },
+    "cut-iceberg": {
+      "frames": 83,
+      "drawCallsMedian": 67,
+      "drawCallsMax": 73,
+      "trianglesMedian": 37425,
+      "pointsMedian": 262,
+      "jsMsMedian": 1.3,
+      "jsMsP99": 17.5,
+      "swiftshaderFpsMedian": 3.3,
+      "pageFps": 2.9,
+      "info": null,
+      "errors": []
+    }
+  }
+}
