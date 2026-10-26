@@ -129,11 +129,47 @@
       white-space: nowrap;
     }
     #toast.show { opacity: 1; }
-    /* Test-cut: cinematic bars (2.39:1, capped on tall portrait screens) and slash flash */
-    .bar-cine { position: fixed; left: 0; right: 0; height: 0; background: var(--climax-bg); pointer-events: none; transition: height 0.6s ease-in-out; }
-    #cineTop { top: 0; } #cineBottom { bottom: 0; }
-    body.cine .bar-cine { height: min(14vh, max(0px, calc((100vh - 100vw / 2.39) / 2))); }
-    body.cine #bottom { opacity: 0; }
+    /* Test-cut: cinematic bars. Sizes are set from main.js so the visible area is exactly 2.39:1. */
+    .bar-cine { position: fixed; background: #000; pointer-events: none; width: 0; height: 0; }
+    #cineTop { top: 0; left: 0; right: 0; width: auto; } #cineBottom { bottom: 0; left: 0; right: 0; width: auto; }
+    #cineLeft { left: 0; top: 0; bottom: 0; height: auto; } #cineRight { right: 0; top: 0; bottom: 0; height: auto; }
+    body.cine #bottom, body.cine #stones { opacity: 0; pointer-events: none; }
+    body.cine #bottom * { pointer-events: none; }
+
+    /* Whetstone toggles (left edge, mirrors the angle slider) */
+    #stones {
+      position: fixed; left: calc(env(safe-area-inset-left) + 10px); top: 50%; transform: translateY(-50%);
+      display: flex; flex-direction: column; gap: 8px; pointer-events: auto;
+    }
+    #stones button {
+      min-width: 0; width: 52px; min-height: 0; height: 58px; padding: 4px 0; border-radius: 14px; letter-spacing: 0;
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+      background: var(--panel); color: var(--ink); box-shadow: 0 2px 8px rgba(0,0,0,0.3); border: 2px solid transparent;
+    }
+    #stones button b { font-size: 20px; line-height: 1; }
+    #stones button small { font-size: 10px; opacity: 0.8; }
+    #stones button i { width: 30px; height: 6px; border-radius: 3px; margin-top: 2px; }
+    @media (max-height: 520px) {
+      #stones { top: auto; transform: none; bottom: calc(env(safe-area-inset-bottom) + 8px); flex-direction: row; }
+      #stones button { height: 52px; }
+    }
+    #stones button.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent), 0 2px 8px rgba(0,0,0,0.3); }
+
+    /* Test-cut target chips */
+    #targets { display: flex; gap: 6px; justify-content: center; flex-wrap: nowrap; max-width: 100%; }
+    #targets button {
+      min-width: 0; min-height: 44px; padding: 4px 10px; border-radius: 12px; font-size: 15px; letter-spacing: 0.05em;
+      display: flex; flex-direction: column; align-items: center; line-height: 1.15;
+      background: var(--panel); color: var(--ink); box-shadow: 0 2px 8px rgba(0,0,0,0.3); border: 2px solid transparent;
+    }
+    #targets button small { font-size: 10px; opacity: 0.75; letter-spacing: 0; }
+    #targets button.on { border-color: var(--accent); }
+    #targets button.locked { opacity: 0.42; filter: grayscale(1); }
+    #targets button.short small { color: var(--accent); opacity: 1; }
+    #targets button.fresh { animation: fresh 0.9s ease-out 2; }
+    @keyframes fresh { 50% { transform: scale(1.12); box-shadow: 0 0 16px var(--accent); } }
+    #capMark { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--ink); opacity: 0.7; }
+    #result .row button { padding: 12px 16px; font-size: 16px; letter-spacing: 0.08em; min-width: 0; }
     #flash { position: fixed; inset: 0; pointer-events: none; opacity: 0; }
     .hidden { display: none !important; }
   </style>
@@ -154,7 +190,7 @@
       <div class="row">
         <span class="label">鋒利度</span>
         <div class="bar"><div class="fill" id="sharpFill"></div>
-          <div class="ticks"><i style="left:20%"></i><i style="left:45%"></i><i style="left:70%"></i><i style="left:90%"></i></div>
+          <div class="ticks" id="sharpTicks"></div><div id="capMark"></div>
         </div>
         <span class="value" id="sharpText">0%</span>
       </div>
@@ -185,8 +221,12 @@
     <span class="cap" style="bottom:2px">0°</span>
   </div>
 
+  <div id="stones" aria-label="砥石"></div>
+
   <div id="cineTop" class="bar-cine"></div>
   <div id="cineBottom" class="bar-cine"></div>
+  <div id="cineLeft" class="bar-cine"></div>
+  <div id="cineRight" class="bar-cine"></div>
   <div id="flash"></div>
   <div id="toast"></div>
 
@@ -196,12 +236,14 @@
       <div id="resultBody"></div>
       <div class="row">
         <button id="againBtn" class="secondary">繼續磨</button>
-        <button id="restartBtn">重來</button>
+        <button id="nextBtn">再切一次</button>
+        <button id="restartBtn" class="secondary">重來</button>
       </div>
     </div>
   </div>
 
   <div id="bottom">
+    <div id="targets" aria-label="試刀目標"></div>
     <button id="testBtn">試刀</button>
     <div id="credit">場景與刀皆為程式生成・無外部素材</div>
   </div>

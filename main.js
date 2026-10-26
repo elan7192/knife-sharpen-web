@@ -41,14 +41,43 @@ const SEG_LEVELS = [0.25, 0.5, 0.75, 1]; // each crossing rings the 刃鳴 and b
 const GAIN_PER_PASS = 0.06; // progress a segment gains per ideal full pass over it
 const SEG_WINDOW = 1.5 / SEGS; // contact patch half-width in edge units
 
-const TIERS = [
-  { key: 'paper', name: '紙', need: 0.2 },
-  { key: 'bamboo', name: '竹子', need: 0.45 },
-  { key: 'iron', name: '鐵', need: 0.7 },
-  { key: 'ice', name: '冰山', need: 0.9 },
+// Test-cut targets, in unlock order. need = sharpness that unlocks it (and that a cut requires);
+// hitstop = cut freeze (s, capped by HITSTOP_MAX); dull = edge lost per successful cut, so a
+// target unlocked earlier can bounce the blade later until it is touched up again.
+const TARGETS = [
+  { id: 'paper', name: '紙', need: 0.0, hitstop: 0.04, dull: 0.0 },
+  { id: 'makiwara', name: '卷藁', need: 0.3, hitstop: 0.06, dull: 0.01 },
+  { id: 'iron', name: '鐵', need: 0.55, hitstop: 0.09, dull: 0.03 },
+  { id: 'boulder', name: '巨石', need: 0.75, hitstop: 0.11, dull: 0.04 },
+  { id: 'iceberg', name: '冰山', need: 0.92, hitstop: 0.12, dull: 0.03 },
 ];
-const RANKS = ['鈍刀', '入門', '利刃', '名刀', '神品'];
+const RANKS = ['鈍刀', '入門', '見習', '利刃', '名刀', '神品']; // index = best target cut + 1
 const HITSTOP_MAX = 0.12; // seconds; research: hitstop must be capped
+const FAIL_HITSTOP = 0.07;
+const SLOWMO_SCALE = 0.15; // time scale during the slash
+const SLASH_TIME = 0.14; // game seconds for the slash stroke (~0.9 s real at SLOWMO_SCALE)
+const LETTERBOX_ASPECT = 2.39; // visible area during the cinematic is exactly this aspect
+const LETTERBOX_IN = 0.6; // seconds for the bars to slide in / out
+const CINE_HFOV = 44; // horizontal field of view (deg) of the 2.39:1 cinematic frame
+const CUT_TILT = THREE.MathUtils.degToRad(30); // pre-cut plane: 30° off vertical (05-model-specs)
+const SHAKE_TIME = 0.45; // camera shake decay after the freeze (s)
+
+// Whetstones 粗 / 中 / 細: rate = progress multiplier, cap = highest sharpness that stone can reach,
+// wear = how fast its top dishes, fx = particles at the contact point, sound = grind timbre.
+// Colours are palette entries (05/palettes.json): dusk stone, dusk wood, day gravel.
+const STONES = [
+  { id: 'coarse', name: '粗', grit: '#220', color: '#5C5650', rate: 2.2, cap: 0.55, wear: 1.0, fx: 'spark',
+    sound: { f0: 240, f1: 950, q: 0.7, gain: 1.0, grit: 0.7, hiss: 0.04, hissF: 2400 } },
+  { id: 'medium', name: '中', grit: '#1000', color: '#A8643C', rate: 1.0, cap: 0.85, wear: 0.45, fx: 'slurry',
+    sound: { f0: 480, f1: 1700, q: 1.1, gain: 0.75, grit: 0.15, hiss: 0.12, hissF: 3600 } },
+  { id: 'fine', name: '細', grit: '#6000', color: '#DCD3C3', rate: 0.5, cap: 1.0, wear: 0.2, fx: 'slurry',
+    sound: { f0: 1100, f1: 3400, q: 2.2, gain: 0.5, grit: 0, hiss: 0.28, hissF: 6400 } },
+];
+const WEAR_COLS = 28; // stone top subdivisions along its length (wear profile resolution)
+const WEAR_ROWS = 6;
+const WEAR_DEPTH = 0.0025; // m: deepest dish a stone can get
+const WEAR_RATE = 0.012; // wear per full pass at full pressure on wear-1.0 stone
+const WEAR_SIGMA = 0.02; // m: width of the contact patch that wears the stone
 
 const isMobile = matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 1;
 const clamp = THREE.MathUtils.clamp;
@@ -157,8 +186,6 @@ const mat = {
   darkWood: flat(shade(P.wood, 0.55), 0.85),
   handle: new THREE.MeshStandardMaterial({ color: shade(P.wood, 0.42), roughness: 0.5 }),
   horn: flat(INK, 0.5),
-  stoneTop: new THREE.MeshStandardMaterial({ color: P.stone.clone().lerp(P.wood, 0.3), roughness: 0.85 }),
-  stoneBottom: new THREE.MeshStandardMaterial({ color: shade(P.water, 0.9), roughness: 0.9 }),
   rock: flat(P.stone, 0.92),
   paleRock: flat(shade(P.stone, 1.15), 0.9),
   moss: flat(P.leaf, 1),
@@ -171,8 +198,6 @@ const mat = {
   blade: new THREE.MeshPhysicalMaterial({ color: '#e9ecf0', metalness: 1, roughness: 0.38, envMapIntensity: 1.3, side: THREE.DoubleSide }),
   steel: new THREE.MeshStandardMaterial({ color: '#d5d9de', metalness: 1, roughness: 0.25 }),
 };
-const STONE_DRY = mat.stoneTop.color.clone();
-const STONE_WET = STONE_DRY.clone().lerp(P.water, 0.35);
 
 // ---------------------------------------------------------------------------
 // Geometry helpers
@@ -272,21 +297,81 @@ scene.add(stage);
   scene.add(merged(frame, mat.darkWood));
 }
 
-// Whetstone on a wooden holder (砥石台)
+// Whetstones on a wooden holder (砥石台). Three stones (粗/中/細); the active one sits in the holder,
+// the others rest behind it. Each stone's top is subdivided so it can dish with use (wear profile
+// along its length) and darken via vertex colours.
+const stoneHolder = new THREE.Group();
 {
-  const stoneGroup = new THREE.Group();
   const holder = [];
   for (const sx of [-1, 1]) holder.push(place(new THREE.BoxGeometry(0.03, 0.015, STONE_W + 0.07), sx * (STONE_LEN / 2 - 0.03), 0.0075, 0)); // feet
   holder.push(place(new THREE.BoxGeometry(STONE_LEN + 0.05, HOLDER_H - 0.015, STONE_W + 0.03), 0, 0.015 + (HOLDER_H - 0.015) / 2, 0)); // bed
   for (const sx of [-1, 1]) holder.push(place(new THREE.BoxGeometry(0.012, 0.016, STONE_W + 0.03), sx * (STONE_LEN / 2 + 0.008), HOLDER_H + 0.008, 0)); // end stops
-  stoneGroup.add(merged(holder, mat.darkWood));
-  const bottom = mesh(new THREE.BoxGeometry(STONE_LEN, STONE_H * 0.4, STONE_W), mat.stoneBottom);
-  bottom.position.y = HOLDER_H + STONE_H * 0.2;
-  const top = mesh(new THREE.BoxGeometry(STONE_LEN, STONE_H * 0.6, STONE_W), mat.stoneTop);
-  top.position.y = HOLDER_H + STONE_H * 0.7;
-  stoneGroup.add(bottom, top);
-  stoneGroup.position.x = STATION_X;
-  onTable.add(stoneGroup);
+  stoneHolder.add(merged(holder, mat.darkWood));
+  stoneHolder.position.x = STATION_X;
+  onTable.add(stoneHolder);
+}
+// Where the stones sit: [in the holder, rest slot A, rest slot B] (onTable-local)
+const STONE_SLOTS = [
+  { x: STATION_X, y: HOLDER_H, z: 0, ry: 0 },
+  { x: -0.25, y: 0, z: -0.2, ry: 0.12 },
+  { x: 0.2, y: 0, z: -0.2, ry: -0.1 },
+];
+const stones = STONES.map((def) => {
+  const geo = new THREE.BoxGeometry(STONE_LEN, STONE_H, STONE_W, WEAR_COLS, 1, WEAR_ROWS);
+  geo.translate(0, STONE_H / 2, 0); // bottom at 0, top surface at STONE_H
+  const p = geo.attributes.position;
+  const col = new Float32Array(p.count * 3).fill(1);
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  // Every vertex on the top rim (top face + upper row of the side faces) follows the dish, so no cracks.
+  const top = [], topCol = [], topProf = [];
+  for (let i = 0; i < p.count; i++) {
+    if (p.getY(i) < STONE_H - 1e-5) continue;
+    top.push(i);
+    topCol.push(Math.round(((p.getX(i) + STONE_LEN / 2) / STONE_LEN) * WEAR_COLS));
+    topProf.push(1 - Math.pow((2 * p.getZ(i)) / STONE_W, 4)); // flat-bottomed dish across the width
+  }
+  const dry = new THREE.Color(def.color);
+  const material = new THREE.MeshStandardMaterial({ color: dry, roughness: 0.85, vertexColors: true });
+  const m = mesh(geo, material);
+  onTable.add(m);
+  return {
+    def, mesh: m, material, dry, wet: dry.clone().lerp(P.water, 0.35).multiplyScalar(0.85),
+    wear: new Float32Array(WEAR_COLS + 1), top: Int32Array.from(top), topCol: Int32Array.from(topCol),
+    topProf: Float32Array.from(topProf), dirty: false, slot: 0, wet01: 0,
+  };
+});
+const stoneIndex = (id) => STONES.findIndex((s) => s.id === id);
+function placeStones(activeIdx, k = 1, from = null) {
+  let rest = 1;
+  stones.forEach((s, i) => {
+    const slot = i === activeIdx ? 0 : rest++;
+    const a = STONE_SLOTS[from ? from[i] : slot], b = STONE_SLOTS[slot];
+    s.mesh.position.set(lerp(a.x, b.x, k), lerp(a.y, b.y, k) + Math.sin(k * Math.PI) * 0.06, lerp(a.z, b.z, k));
+    s.mesh.rotation.y = lerp(a.ry, b.ry, k);
+    if (k >= 1) s.slot = slot;
+  });
+}
+/** Apply a stone's wear profile to its top rim (positions, vertex colour darkening, normals). */
+function applyStoneWear(s) {
+  s.dirty = false;
+  const p = s.mesh.geometry.attributes.position;
+  const c = s.mesh.geometry.attributes.color;
+  for (let k = 0; k < s.top.length; k++) {
+    const i = s.top[k];
+    const w = s.wear[s.topCol[k]] * s.topProf[k];
+    p.setY(i, STONE_H - w * WEAR_DEPTH);
+    const d = 1 - w * 0.4; // worn (and slurry-stained) metal-grey band
+    c.setXYZ(i, d, d * 0.97, d * 0.95);
+  }
+  p.needsUpdate = true;
+  c.needsUpdate = true;
+  s.mesh.geometry.computeVertexNormals();
+}
+/** Dish depth (m) under stone-local x at the centre line. */
+function stoneDishAt(s, x) {
+  const u = clamp((x + STONE_LEN / 2) / STONE_LEN, 0, 1) * WEAR_COLS;
+  const i = Math.floor(u), f = u - i;
+  return lerp(s.wear[i], s.wear[Math.min(WEAR_COLS, i + 1)], f) * WEAR_DEPTH;
 }
 
 // Water bucket for flavour
@@ -613,14 +698,18 @@ knifeTilt.add(knifeContact);
 knifeContact.add(sharpKnife);
 onTable.add(knifeRoot);
 
-// Test-cut knife, held blade-vertical above the stage
+// Test-cut knife. slashRig sits at the target's cut centre, tilted so its local y runs up the cut
+// plane; chopRig.position.y = distance of the edge from that centre along the slash line.
+const slashRig = new THREE.Group();
+slashRig.rotation.z = CUT_TILT;
 const chopRig = new THREE.Group();
-chopRig.rotation.y = Math.PI / 2;
+chopRig.rotation.y = Math.PI / 2; // blade plane = the cut plane, edge pointing down the slash
 const chopKnife = buildKnife();
-chopKnife.position.x = -0.07; // flat part of the edge over the target
+chopKnife.position.x = -0.09; // centre the edge over the target
 chopRig.add(chopKnife);
 chopRig.visible = false;
-stage.add(chopRig);
+slashRig.add(chopRig);
+stage.add(slashRig);
 
 // Chopping block on the stage
 const BLOCK_H = 0.05;
@@ -727,7 +816,11 @@ const SPARK_COLORS = ['#ffd27a', '#ffb347', '#fff2c4'].map((c) => new THREE.Colo
 const HEAT_COLORS = [CLIMAX.heat, new THREE.Color('#fff2c4')];
 const DROP_COLOR = new THREE.Color('#cfe8ff');
 const ICE_COLOR = new THREE.Color('#E8F1F8');
-const LEAF_COLOR = new THREE.Color('#b7d38a');
+const STRAW_COLORS = ['#DCD3C3', '#B08A63', '#C9D8C5'].map((c) => new THREE.Color(c));
+const CHIP_COLORS = ['#7C7A75', '#5C5650', '#DCD3C3'].map((c) => new THREE.Color(c));
+// Slurry (研ぎ汁): muddy grey droplets tinted by each stone (stone colour mixed with palette stone grey)
+const SLURRY_GREY = new THREE.Color('#7C7A75');
+const SLURRY_COLORS = STONES.map((d) => [0.55, 0.75].map((k) => new THREE.Color(d.color).lerp(SLURRY_GREY, k).multiplyScalar(0.85)));
 const GLINT_COLORS = [CLIMAX.gleam, new THREE.Color('#ffffff')];
 
 function burst(system, at, n, speed, colors, life) {
@@ -761,24 +854,52 @@ const audio = {
     const data = this.noise.getChannelData(0);
     for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
 
-    const src = ctx.createBufferSource();
-    src.buffer = this.noise;
-    src.loop = true;
-    this.grindFilter = ctx.createBiquadFilter();
-    this.grindFilter.type = 'bandpass';
-    this.grindFilter.frequency.value = 900;
-    this.grindFilter.Q.value = 0.9;
-    this.grindGain = ctx.createGain();
-    this.grindGain.gain.value = 0;
-    src.connect(this.grindFilter).connect(this.grindGain).connect(this.master);
-    src.start();
+    // Sparse clicks = the "grit" crackle of a coarse stone.
+    this.gritBuf = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
+    const gd = this.gritBuf.getChannelData(0);
+    for (let n = 0; n < 900; n++) {
+      const at = (Math.random() * (gd.length - 40)) | 0;
+      const amp = (Math.random() < 0.5 ? -1 : 1) * (0.3 + Math.random() * 0.7);
+      for (let j = 0; j < 30; j++) gd[at + j] += amp * Math.exp(-j / 5) * (Math.random() * 2 - 1);
+    }
+    // Continuous grind = body (bandpass noise) + grit crackle (highpassed clicks) + hiss (high band).
+    const layer = (buffer, type, freq, q) => {
+      const src = ctx.createBufferSource();
+      src.buffer = buffer;
+      src.loop = true;
+      const f = ctx.createBiquadFilter();
+      f.type = type;
+      f.frequency.value = freq;
+      f.Q.value = q;
+      const g = ctx.createGain();
+      g.gain.value = 0;
+      src.connect(f).connect(g).connect(this.master);
+      src.start(0, Math.random() * buffer.duration);
+      return { f, g };
+    };
+    this.body = layer(this.noise, 'bandpass', 900, 0.9);
+    this.grit = layer(this.gritBuf, 'highpass', 1800, 0.7);
+    this.hiss = layer(this.noise, 'bandpass', 4000, 1.5);
+    this.grindOn = false;
     if (ctx.state === 'suspended') ctx.resume().catch(() => {});
   },
-  setGrind(level, freq) {
+  /**
+   * Grind sound follows the stroke: level 0..1 (speed x pressure), freq = body centre (Hz),
+   * timbre = the active stone's sound table. Ramped with setTargetAtTime so it never zips.
+   */
+  setGrind(level, freq = 500, timbre = STONES[0].sound, burr = 0) {
     if (!this.ctx) return;
+    if (level <= 0 && !this.grindOn) return; // already silent: don't pile up automation events
+    this.grindOn = level > 0;
     const t = this.ctx.currentTime;
-    this.grindGain.gain.setTargetAtTime(level, t, 0.04);
-    this.grindFilter.frequency.setTargetAtTime(freq, t, 0.06);
+    const s = timbre;
+    this.body.g.gain.setTargetAtTime(level * 0.55 * s.gain, t, 0.05);
+    this.body.f.frequency.setTargetAtTime(freq, t, 0.06);
+    this.body.f.Q.setTargetAtTime(s.q, t, 0.1);
+    this.grit.g.gain.setTargetAtTime(level * s.gain * (s.grit + burr * 0.4), t, 0.04);
+    this.grit.f.frequency.setTargetAtTime(1400 + freq * 0.8, t, 0.08);
+    this.hiss.g.gain.setTargetAtTime(level * (s.hiss + burr * 0.05), t, 0.06);
+    this.hiss.f.frequency.setTargetAtTime(s.hissF * (0.85 + level * 0.3), t, 0.08);
   },
   noiseBurst(duration, type, f0, f1, vol) {
     const ctx = this.ctx;
@@ -854,6 +975,52 @@ const audio = {
     if (!this.ctx) return;
     this.noiseBurst(0.18, 'bandpass', 400, 2200, 0.25);
   },
+  /** Temple-bell strike (inharmonic partials, long decay): a new test-cut target unlocked. */
+  bell() {
+    if (!this.ctx) return;
+    const f = 392;
+    [[1, 2.6, 0.2], [2.0, 1.8, 0.07], [2.76, 1.4, 0.07], [5.4, 0.7, 0.03], [8.9, 0.35, 0.015]]
+      .forEach(([r, d, v]) => this.tone(f * r, d, v));
+    this.tone(f * 1.003, 2.6, 0.08); // slight beating, like a real bell
+    this.noiseBurst(0.05, 'bandpass', 3000, 1500, 0.12);
+  },
+  /** Blade bounces off: bright clink + dull knock. */
+  clink() {
+    if (!this.ctx) return;
+    this.tone(2900, 0.35, 0.12, 'triangle');
+    this.tone(4350, 0.2, 0.05);
+    this.tone(160, 0.25, 0.25, 'triangle');
+    this.noiseBurst(0.08, 'highpass', 4000, 2000, 0.25);
+  },
+  /** Low swell as time slows down. */
+  slowmo() {
+    if (!this.ctx) return;
+    const ctx = this.ctx, t = ctx.currentTime;
+    const o = ctx.createOscillator();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(140, t);
+    o.frequency.exponentialRampToValueAtTime(55, t + 0.9);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.22, t + 0.15);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 1.0);
+    o.connect(g).connect(this.master);
+    o.start(t);
+    o.stop(t + 1.05);
+    this.noiseBurst(0.9, 'lowpass', 1200, 200, 0.12);
+  },
+  /** Stone set into the holder. */
+  stoneSwap() {
+    if (!this.ctx) return;
+    this.tone(210, 0.12, 0.18, 'triangle');
+    this.noiseBurst(0.07, 'lowpass', 1800, 300, 0.3);
+  },
+  /** Heavy target: low boom under the slice. */
+  boom(weight) {
+    if (!this.ctx) return;
+    this.tone(70 + 30 / (1 + weight), 0.5 + weight * 0.1, 0.3, 'sine');
+    this.noiseBurst(0.3, 'lowpass', 900, 120, 0.25 + weight * 0.05);
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -861,13 +1028,15 @@ const audio = {
 // ---------------------------------------------------------------------------
 const tweens = new Set();
 let timeScale = 1; // < 1 during the test-cut slow motion
-function tween(duration, fn, ease = (t) => t) {
-  return new Promise((resolve) => tweens.add({ t: 0, duration, fn, ease, resolve }));
+/** real = advance on wall-clock time (ignores slow motion and the hitstop freeze). */
+function tween(duration, fn, ease = (t) => t, real = false) {
+  return new Promise((resolve) => tweens.add({ t: 0, duration, fn, ease, resolve, real }));
 }
 const wait = (s) => tween(s, () => {});
-function updateTweens(dt) {
+const waitReal = (s) => tween(s, () => {}, undefined, true);
+function updateTweens(gameDt, realDt) {
   for (const tw of tweens) {
-    tw.t += dt;
+    tw.t += tw.real ? realDt : gameDt;
     const k = Math.min(1, tw.t / tw.duration);
     tw.fn(tw.ease(k));
     if (k >= 1) {
@@ -888,9 +1057,30 @@ const ui = {
   segs: $('edgeSegs'),
   hint: $('hint'), testBtn: $('testBtn'), toast: $('toast'),
   result: $('result'), resultTitle: $('resultTitle'), resultBody: $('resultBody'),
-  againBtn: $('againBtn'), restartBtn: $('restartBtn'),
+  againBtn: $('againBtn'), restartBtn: $('restartBtn'), nextBtn: $('nextBtn'),
   slider: $('angleSlider'), hud: $('hud'), bottom: $('bottom'),
+  stones: $('stones'), targets: $('targets'), ticks: $('sharpTicks'), capMark: $('capMark'),
+  bars: [$('cineTop'), $('cineBottom'), $('cineLeft'), $('cineRight')],
 };
+for (const t of TARGETS) {
+  if (t.need <= 0) continue;
+  const tick = document.createElement('i');
+  tick.style.left = `${t.need * 100}%`;
+  ui.ticks.appendChild(tick);
+}
+const stoneBtns = STONES.map((d) => {
+  const b = document.createElement('button');
+  b.innerHTML = `<b>${d.name}</b><small>${d.grit}</small><i style="background:${d.color}"></i>`;
+  b.setAttribute('aria-label', `${d.name}砥石 ${d.grit}`);
+  ui.stones.appendChild(b);
+  return b;
+});
+const targetBtns = TARGETS.map((t) => {
+  const b = document.createElement('button');
+  b.innerHTML = `<span>${t.name}</span><small></small>`;
+  ui.targets.appendChild(b);
+  return b;
+});
 const sliderThumb = ui.slider.querySelector('.thumb');
 const sliderTrack = ui.slider.querySelector('.track');
 const sliderZone = ui.slider.querySelector('.zone');
@@ -932,6 +1122,7 @@ function toast(text, seconds = 0.9) {
 // ---------------------------------------------------------------------------
 const game = {
   mode: 'sharpen', // 'sharpen' | 'test' | 'result'
+  shortMask: 0, // bit i: target i is unlocked but current sharpness is below its need
   sharpness: 0,
   angle: START_ANGLE,
   pressure: 0,
@@ -947,6 +1138,20 @@ const game = {
   burr: 0,
   edgeU: 0.5,
   stage: 0, // lowest segment level reached across the whole edge
+  stone: 0, // index into STONES
+  unlocked: 0, // highest unlocked target index (sticky: dulling doesn't re-lock)
+  selected: 0, // target chosen for the next test cut
+  best: -1, // best target index cut so far
+  lastDir: 0,
+  wearTimer: 0,
+};
+// Cinematic state (exposed through window.__knife for headless tests)
+const cine = {
+  phase: 'idle', // idle | enter | windup | slash | freeze | split | recoil | result | exit
+  bars: 0, // letterbox amount 0..1 (1 = visible area exactly LETTERBOX_ASPECT)
+  target: null, // id of the target on stage during the cinematic
+  lastHitstopMs: 0,
+  lastResult: null,
 };
 const seg = {
   progress: new Float32Array(SEGS),
@@ -1087,15 +1292,30 @@ function onButton(el, fn) {
     fn();
   });
 }
-onButton(ui.testBtn, () => { if (game.mode === 'sharpen') runTest(); });
+onButton(ui.testBtn, () => { if (game.mode === 'sharpen') runTest(TARGETS[game.selected].id); });
 onButton(ui.againBtn, () => backToSharpen(false));
 onButton(ui.restartBtn, () => backToSharpen(true));
+onButton(ui.nextBtn, () => { if (game.mode === 'result') runTest(TARGETS[game.selected].id); });
+stoneBtns.forEach((b, i) => b.addEventListener('click', () => { audio.unlock(); selectStone(i); }));
+targetBtns.forEach((b, i) => b.addEventListener('click', () => {
+  audio.unlock();
+  if (game.mode !== 'sharpen') return;
+  if (i > game.unlocked) {
+    audio.tick(false);
+    toast(`需要鋒利度 ${Math.round(TARGETS[i].need * 100)}%`, 1.1);
+    return;
+  }
+  audio.click();
+  selectTarget(i);
+}));
 
 // ---------------------------------------------------------------------------
 // Sharpening simulation
 // ---------------------------------------------------------------------------
 const contact = new THREE.Vector3();
 let lastAngleDeg = Math.round(START_ANGLE);
+let stoneSwitching = false;
+let stoneSwap = null; // resolves when the current stone swap tween ends
 
 function onSegmentLevel(i, level) {
   seg.flash[i] = 1;
@@ -1113,8 +1333,95 @@ function onSegmentLevel(i, level) {
   }
 }
 
+function selectStone(i, instant = false) {
+  if (i < 0 || i >= STONES.length) return;
+  if (!instant && (i === game.stone || stoneSwitching || game.mode !== 'sharpen')) return;
+  const from = stones.map((s) => s.slot);
+  game.stone = i;
+  const def = STONES[i];
+  stoneBtns.forEach((b, k) => b.classList.toggle('on', k === i));
+  ui.capMark.style.display = def.cap >= 1 ? 'none' : '';
+  ui.capMark.style.left = `${def.cap * 100}%`;
+  if (instant) {
+    placeStones(i);
+    return;
+  }
+  audio.click();
+  stoneSwitching = true;
+  drag = second = null; // lift the knife while the stones swap
+  audio.setGrind(0);
+  toast(`${def.name}砥 ${def.grit}`, 0.8);
+  stoneSwap = tween(0.35, (k) => placeStones(i, k, from), easeInOut).then(() => {
+    stoneSwitching = false;
+    audio.stoneSwap();
+    knifeRoot.getWorldPosition(tmpP);
+    burst(drops, tmpP, 6, 0.3, SLURRY_COLORS[i], 0.5);
+  });
+}
+
+function refreshTargets() {
+  targetBtns.forEach((b, i) => {
+    const t = TARGETS[i];
+    const locked = i > game.unlocked;
+    b.classList.toggle('locked', locked);
+    b.classList.toggle('on', i === game.selected);
+    const short = !locked && game.sharpness < t.need - 1e-6; // unlocks are permanent; the edge may have dulled since
+    b.classList.toggle('short', short);
+    b.lastChild.textContent = locked ? `🔒${Math.round(t.need * 100)}%` : short ? `不足 ${Math.round(t.need * 100)}%` : i <= game.best ? '✓ 已斬' : t.need > 0 ? `${Math.round(t.need * 100)}%` : '入門';
+    b.setAttribute('aria-label', locked ? `${t.name}（需要鋒利度 ${Math.round(t.need * 100)}%）` : short ? `${t.name}（目前鋒利度不足，需要 ${Math.round(t.need * 100)}%）` : t.name);
+  });
+  ui.testBtn.textContent = `試刀・${TARGETS[game.selected].name}`;
+}
+
+function selectTarget(i) {
+  game.selected = clamp(i, 0, game.unlocked);
+  refreshTargets();
+  showStageTarget(game.selected);
+}
+
+/** Sticky unlocks: crossing a threshold rings the bell and selects the new target. */
+function checkUnlocks(quiet = false) {
+  let changed = false;
+  while (game.unlocked < TARGETS.length - 1 && game.sharpness >= TARGETS[game.unlocked + 1].need - 1e-6) {
+    game.unlocked++;
+    changed = true;
+    if (!quiet) {
+      audio.bell();
+      toast(`解鎖試刀：${TARGETS[game.unlocked].name}`, 1.5);
+      const b = targetBtns[game.unlocked];
+      b.classList.remove('fresh');
+      void b.offsetWidth; // restart the CSS animation
+      b.classList.add('fresh');
+    }
+  }
+  if (changed) selectTarget(game.unlocked);
+  // Refresh the labels when an unlocked target drops below / climbs back over its requirement.
+  let mask = 0;
+  for (let i = 1; i <= game.unlocked; i++) if (game.sharpness < TARGETS[i].need - 1e-6) mask |= 1 << i;
+  if (mask !== game.shortMask) {
+    game.shortMask = mask;
+    if (!changed) refreshTargets();
+  }
+}
+
+function recomputeSharpness() {
+  let sum = 0;
+  for (let i = 0; i < SEGS; i++) sum += seg.progress[i];
+  game.sharpness = sum / SEGS;
+}
+
+/** A successful cut costs a little edge (levels/dings already earned are kept). */
+function dullEdge(amount) {
+  if (amount <= 0) return;
+  for (let i = 0; i < SEGS; i++) seg.progress[i] = Math.max(0, seg.progress[i] - amount);
+  recomputeSharpness();
+  setKnifeFinish(game.sharpness);
+}
+
 function updateSharpening(dt, t) {
-  const down = !!drag;
+  const st = STONES[game.stone];
+  const stone = stones[game.stone];
+  const down = !!drag && !stoneSwitching;
   const prevX = game.knifeX;
   game.knifeX = damp(game.knifeX, game.knifeTargetX, 22, dt);
   // Speed normalised to a 0.42 m stroke so the pressure feel doesn't depend on the stone length.
@@ -1131,9 +1438,12 @@ function updateSharpening(dt, t) {
   if (grinding) {
     // Hands are never perfectly steady: a little drift the player must correct.
     setAngle(game.angle + (Math.sin(t * 1.3) + Math.sin(t * 2.9 + 1)) * 0.9 * dt);
-    game.wet = Math.min(1, game.wet + dt * 0.5);
-  } else {
-    game.wet = Math.max(0, game.wet - dt * 0.04);
+    stone.wet01 = Math.min(1, stone.wet01 + dt * 0.5);
+  }
+  for (const s of stones) {
+    if (s !== stone || !grinding) s.wet01 = Math.max(0, s.wet01 - dt * 0.04);
+    s.material.roughness = lerp(0.85, 0.3, s.wet01);
+    s.material.color.lerpColors(s.dry, s.wet, s.wet01);
   }
 
   // Edge coverage: the part of the edge on the stone follows the stroke position.
@@ -1141,22 +1451,39 @@ function updateSharpening(dt, t) {
   game.edgeU = (game.knifeX + KNIFE_TRAVEL) / (KNIFE_TRAVEL * 2);
   const du = Math.abs(game.edgeU - prevU);
   game.burr = damp(game.burr, grinding && game.pressure > PRESS_HI ? 1 : 0, 3, dt);
+  const stoneX = game.knifeX * 0.75; // contact point in stone-local x
   if (grinding && du > 0) {
-    const eff = angleEfficiency(game.angle) * pressureEfficiency(game.pressure);
+    const eff = angleEfficiency(game.angle) * pressureEfficiency(game.pressure) * st.rate;
     for (let i = 0; i < SEGS; i++) {
       const w = segWeight(i, game.edgeU);
       if (w <= 0) continue;
       const p = seg.progress[i];
-      seg.progress[i] = Math.min(1, p + ((du * eff * GAIN_PER_PASS * w) / seg.norm[i]) * (1 - 0.55 * p));
+      const room = st.cap - p;
+      if (room <= 0) continue; // this grit can't refine the edge any further
+      // Slows in the last third of the stone's range so the cap is approached, not slammed into.
+      const ease = 0.3 + 0.7 * Math.min(1, (room / st.cap) * 3);
+      seg.progress[i] = Math.min(st.cap, p + ((du * eff * GAIN_PER_PASS * w) / seg.norm[i]) * (1 - 0.55 * p) * ease);
       while (seg.level[i] < SEG_LEVELS.length && seg.progress[i] >= SEG_LEVELS[seg.level[i]] - 1e-6) {
         seg.level[i]++;
         onSegmentLevel(i, seg.level[i]);
       }
     }
+    // Stone wear: a gaussian contact patch dishes the top where the blade rides.
+    const amt = du * (0.3 + game.pressure) * st.wear * WEAR_RATE;
+    const inv = 1 / (2 * WEAR_SIGMA * WEAR_SIGMA);
+    for (let c = 0; c <= WEAR_COLS; c++) {
+      const dx = -STONE_LEN / 2 + (c / WEAR_COLS) * STONE_LEN - stoneX;
+      stone.wear[c] = Math.min(1, stone.wear[c] + amt * Math.exp(-dx * dx * inv));
+    }
+    stone.dirty = true;
   }
-  let sum = 0;
-  for (let i = 0; i < SEGS; i++) sum += seg.progress[i];
-  game.sharpness = sum / SEGS;
+  game.wearTimer -= dt;
+  if (game.wearTimer <= 0 && stone.dirty) {
+    game.wearTimer = 0.2; // throttled: a few geometry updates per second is plenty for slow wear
+    applyStoneWear(stone);
+  }
+  recomputeSharpness();
+  checkUnlocks();
 
   // Angle band entry feedback, and a soft tick per degree while steering outside it
   const inBand = angleState() === 'good';
@@ -1168,53 +1495,67 @@ function updateSharpening(dt, t) {
   if (deg !== lastAngleDeg && !inBand && (drag || sliderPointer !== null)) audio.tick(false);
   lastAngleDeg = deg;
 
-  // Knife pose: the contact point on the edge rides the stone; the belly rocks onto it.
+  // Knife pose: the contact point on the edge rides the (possibly dished) stone; the belly rocks onto it.
   const ex = edgeXAt(game.edgeU);
-  knifeRoot.position.x = STATION_X + game.knifeX * 0.75;
+  knifeRoot.position.x = STATION_X + stoneX;
+  knifeRoot.position.y = STONE_TOP + 0.0005 - (stoneSwitching ? 0 : stoneDishAt(stone, stoneX));
   knifeRoot.position.z = Math.sin(game.knifeX * 18) * 0.004;
   knifeTilt.rotation.x = THREE.MathUtils.degToRad(90 - game.angle);
   knifeContact.rotation.z = -Math.atan(edgeSlope(ex));
   sharpKnife.position.set(-ex, -edgeY(ex), 0);
   setKnifeFinish(game.sharpness);
-  mat.stoneTop.roughness = lerp(0.85, 0.3, game.wet);
-  mat.stoneTop.color.lerpColors(STONE_DRY, STONE_WET, game.wet);
 
-  // Particles at the contact point
+  // Particles at the contact point: sparks on the coarse stone, muddy slurry on medium / fine.
   knifeRoot.getWorldPosition(contact);
   if (grinding) {
     const dirX = Math.sign(v) || 1;
-    game.dropAcc += dt * game.speed * 70;
+    const slurry = SLURRY_COLORS[game.stone];
+    if (game.lastDir && dirX !== game.lastDir && game.speed > 0.15 && st.fx === 'slurry') {
+      burst(drops, contact, 4, 0.35, slurry, 0.45); // splash at the stroke reversal
+    }
+    game.lastDir = dirX;
+    const drive = game.speed * (0.3 + game.pressure);
+    if (st.fx === 'spark') {
+      game.sparkAcc += dt * drive * 110 * (1 + game.burr * 2);
+      while (game.sparkAcc >= 1) {
+        game.sparkAcc -= 1;
+        tmpV.set(-dirX * (0.5 + Math.random() * 1.3), 0.3 + Math.random() * 1.1, (Math.random() - 0.5) * 0.9);
+        sparks.emit(contact, tmpV, SPARK_COLORS[(Math.random() * 3) | 0], 0.12 + Math.random() * 0.25);
+      }
+    }
+    game.dropAcc += dt * drive * (st.fx === 'spark' ? 18 : game.stone === 1 ? 85 : 55);
     while (game.dropAcc >= 1) {
       game.dropAcc -= 1;
       tmpP.copy(contact).add(tmpV.set((Math.random() - 0.5) * 0.08, 0.002, (Math.random() - 0.5) * 0.05));
-      tmpV.set(dirX * (0.2 + Math.random() * 0.5) * game.speed * 2, 0.3 + Math.random() * 0.6, (Math.random() - 0.5) * 0.4);
-      drops.emit(tmpP, tmpV, DROP_COLOR, 0.6 + Math.random() * 0.4);
+      tmpV.set(dirX * (0.2 + Math.random() * 0.5) * game.speed * 1.6, 0.2 + Math.random() * 0.5, (Math.random() - 0.5) * 0.35);
+      drops.emit(tmpP, tmpV, slurry[(Math.random() * 2) | 0], 0.45 + Math.random() * 0.4);
     }
-    // Sparks mostly mean "too much pressure" (burr): a readable warning.
-    game.sparkAcc += dt * (Math.max(0, game.pressure - PRESS_HI) * 600 + Math.max(0, game.pressure - 0.3) * 30) * game.speed;
-    while (game.sparkAcc >= 1) {
-      game.sparkAcc -= 1;
-      tmpV.set(-dirX * (0.6 + Math.random() * 1.2), 0.4 + Math.random() * 1.1, (Math.random() - 0.5) * 0.8);
-      sparks.emit(contact, tmpV, SPARK_COLORS[(Math.random() * 3) | 0], 0.25 + Math.random() * 0.3);
-    }
+  } else {
+    game.lastDir = 0;
   }
 
-  // Grind sound: brighter and steadier in the band, rougher with a burr.
-  audio.setGrind(grinding ? Math.min(0.55, game.speed * 0.9) * (0.35 + game.pressure) * (inBand ? 1 : 0.7) : 0,
-    (500 + game.speed * 1600 + game.pressure * 400) * (inBand ? 1.25 : 0.9) * (1 - game.burr * 0.35));
+  // Grind sound: level follows speed x pressure, pitch follows speed; timbre per grit; rougher with a burr.
+  const sd = st.sound;
+  const level = grinding ? Math.min(1, game.speed * 1.3) * (0.35 + 0.65 * game.pressure) * (inBand ? 1 : 0.75) : 0;
+  const freq = lerp(sd.f0, sd.f1, clamp(game.speed, 0, 1)) * (0.9 + game.pressure * 0.25) * (inBand ? 1.08 : 0.92) * (1 - game.burr * 0.3);
+  audio.setGrind(level, freq, sd, game.burr);
 
   // Coaching hint (throttled to avoid flicker); gentle tone, never "fail".
   game.hintTimer -= dt;
   if (game.hintTimer <= 0) {
     game.hintTimer = 0.3;
+    const capped = st.cap < 1 && game.sharpness >= st.cap - 0.01;
     let msg = DEFAULT_HINT;
     if (down) {
       if (game.angle > BAND_HI) msg = '角度稍陡 ↓ 手指往下一點';
       else if (game.angle < BAND_LO) msg = '角度稍平 ↑ 手指往上一點';
+      else if (capped) msg = `${st.name}砥最多磨到 ${Math.round(st.cap * 100)}%，換更細的砥石`;
       else if (!grinding) msg = '角度剛好，左右來回推！';
       else if (game.pressure < PRESS_LO) msg = '壓力偏輕，推快一點';
       else if (game.pressure > PRESS_HI) msg = '太用力會起毛邊，放慢一點';
       else msg = '很好！刃口在發亮';
+    } else if (capped) {
+      msg = `${st.name}砥已到極限 ${Math.round(st.cap * 100)}%，點左側換砥石`;
     } else if (game.sharpness > 0.03) {
       msg = '推到左右兩端，讓整條刃口都亮起來';
     }
@@ -1272,128 +1613,320 @@ function updateHUD() {
 }
 
 // ---------------------------------------------------------------------------
-// Test-cut targets
+// Test-cut targets. Each one is built ONCE at load as a whole mesh plus two pre-cut halves
+// (split along a 30° plane at build time, cut faces capped with their own material, pivots at
+// the cut-face centre, per 05-model-specs). The halves stay hidden until the cut. No runtime slicing.
+// Target-local frame: bottom at y = 0 (top of the chopping block), cut plane through `c`.
 // ---------------------------------------------------------------------------
-const WHITE = new THREE.Color(1, 1, 1);
-/**
- * Clamps every vertex to one side of the x=0 plane: a cheap, exact "cut" for flat-shaded meshes.
- * Vertices that land on the cut plane get `cutColor` (vertex colours), so the cut face reads clearly.
- */
-function halfGeometry(geo, side, cutColor) {
-  const g = geo.index ? geo.toNonIndexed() : geo.clone();
-  const p = g.attributes.position;
-  const col = new Float32Array(p.count * 3);
-  for (let i = 0; i < p.count; i++) {
-    const x = p.getX(i);
-    const cut = side < 0 ? x >= 0 : x <= 0;
-    p.setX(i, cut ? 0 : x);
-    (cut ? cutColor : WHITE).toArray(col, i * 3);
+const CUT_N = new THREE.Vector3(Math.cos(CUT_TILT), Math.sin(CUT_TILT), 0); // cut-plane normal
+const CUT_U = new THREE.Vector3(-Math.sin(CUT_TILT), Math.cos(CUT_TILT), 0); // in-plane, up the slash line
+const CUT_D = CUT_U.clone().negate(); // slash direction
+const CUT_Z = new THREE.Vector3(0, 0, 1); // in-plane, along the edge
+
+/** Build-time split of a closed mesh by the cut plane through c. Returns both capped halves. */
+function splitGeometry(src, c) {
+  const g = src.index ? src.toNonIndexed() : src.clone();
+  if (!g.attributes.normal) g.computeVertexNormals();
+  const P = g.attributes.position, N = g.attributes.normal, UV = g.attributes.uv;
+  const tmp = new THREE.Vector3();
+  const halves = [];
+  for (const side of [-1, 1]) {
+    const pos = [], nor = [], uv = [], cap = [], seen = new Set();
+    const vtx = (i) => ({
+      p: new THREE.Vector3().fromBufferAttribute(P, i),
+      n: new THREE.Vector3().fromBufferAttribute(N, i),
+      uv: UV ? new THREE.Vector2().fromBufferAttribute(UV, i) : new THREE.Vector2(),
+    });
+    const push = (v) => { pos.push(v.p.x, v.p.y, v.p.z); nor.push(v.n.x, v.n.y, v.n.z); uv.push(v.uv.x, v.uv.y); };
+    for (let t = 0; t < P.count; t += 3) {
+      const tri = [vtx(t), vtx(t + 1), vtx(t + 2)];
+      const d = tri.map((v) => side * CUT_N.dot(tmp.copy(v.p).sub(c)));
+      const poly = [];
+      for (let k = 0; k < 3; k++) { // Sutherland–Hodgman against one plane
+        const a = tri[k], b = tri[(k + 1) % 3], da = d[k], db = d[(k + 1) % 3];
+        if (da >= 0) poly.push(a);
+        if ((da >= 0) !== (db >= 0)) {
+          const f = da / (da - db);
+          const q = { p: a.p.clone().lerp(b.p, f), n: a.n.clone().lerp(b.n, f).normalize(), uv: a.uv.clone().lerp(b.uv, f) };
+          poly.push(q);
+          const key = `${q.p.x.toFixed(5)},${q.p.y.toFixed(5)},${q.p.z.toFixed(5)}`;
+          if (!seen.has(key)) { seen.add(key); cap.push(q.p.clone()); }
+        }
+      }
+      for (let k = 1; k + 1 < poly.length; k++) { push(poly[0]); push(poly[k]); push(poly[k + 1]); }
+    }
+    const surfaceCount = pos.length / 3;
+    // Cap: order the section outline around its centroid in the plane basis (U, Z) and fan it.
+    const centroid = new THREE.Vector3();
+    cap.forEach((p) => centroid.add(p));
+    centroid.divideScalar(Math.max(1, cap.length));
+    const pu = (p) => tmp.copy(p).sub(centroid).dot(CUT_U);
+    const pz = (p) => tmp.copy(p).sub(centroid).dot(CUT_Z);
+    cap.sort((a, b) => Math.atan2(pz(a), pu(a)) - Math.atan2(pz(b), pu(b)));
+    let R = 1e-6;
+    cap.forEach((p) => (R = Math.max(R, p.distanceTo(centroid))));
+    const out = CUT_N.clone().multiplyScalar(-side);
+    const ca = new THREE.Vector3(), cb = new THREE.Vector3();
+    const capVert = (p) => ({ p, n: out, uv: new THREE.Vector2(0.5 + pu(p) / (2 * R), 0.5 + pz(p) / (2 * R)) });
+    for (let k = 0; k < cap.length; k++) {
+      let a = cap[k], b = cap[(k + 1) % cap.length];
+      if (ca.subVectors(a, centroid).cross(cb.subVectors(b, centroid)).dot(out) < 0) [a, b] = [b, a];
+      push(capVert(centroid)); push(capVert(a)); push(capVert(b));
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+    geo.addGroup(0, surfaceCount, 0);
+    geo.addGroup(surfaceCount, pos.length / 3 - surfaceCount, 1);
+    geo.translate(-centroid.x, -centroid.y, -centroid.z); // pivot at the cut-face centre
+    halves.push({ geo, pivot: centroid, side, cap });
   }
-  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
-  g.computeVertexNormals();
-  return g;
+  // How far the section reaches up / down the slash line: where the blade enters and leaves.
+  let sTop = -Infinity, sBottom = Infinity;
+  for (const p of halves[0].cap) {
+    const s = tmp.copy(p).sub(c).dot(CUT_U);
+    sTop = Math.max(sTop, s);
+    sBottom = Math.min(sBottom, s);
+  }
+  g.dispose();
+  return { halves, sTop, sBottom };
 }
 
-const TARGET_DEFS = {
+function canvasTex(size, draw) {
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  draw(c.getContext('2d'), size);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+function radialTex(stops) {
+  return canvasTex(128, (g, n) => {
+    const gr = g.createRadialGradient(n / 2, n / 2, 0, n / 2, n / 2, n / 2);
+    stops.forEach(([o, c]) => gr.addColorStop(o, c));
+    g.fillStyle = gr;
+    g.fillRect(0, 0, n, n);
+  });
+}
+/** Flatten everything below y0 (a flat base so rocks / ice sit on the block). */
+function flattenBelow(geo, y0) {
+  const p = geo.attributes.position;
+  for (let i = 0; i < p.count; i++) if (p.getY(i) < y0) p.setY(i, y0);
+  geo.translate(0, -y0, 0);
+  return geo;
+}
+
+const STRAW = new THREE.Color('#DCD3C3').lerp(new THREE.Color('#B08A63'), 0.35);
+// Per target: geometry, surface / cap materials, cut centre, props (not cut), separation of the halves, impact fx.
+//   anim: upper half (on the +normal side) slides `slide` down the cut, opens by `gap`, falls `fall`, spins `spin`;
+//         lower half opens by `gapLow` and tilts `tilt`; both hop by `hop`.
+const TARGET_BUILD = {
   paper: () => ({
-    geo: new THREE.BoxGeometry(0.2, 0.24, 0.003, 2, 1, 1).translate(0, 0.12, 0),
-    material: new THREE.MeshStandardMaterial({ color: '#F7F7F2', roughness: 0.9, side: THREE.DoubleSide, vertexColors: true }),
-    cut: new THREE.Color('#ffffff'),
-    halfWidth: 0.1, slide: 0.01, hop: 0, topple: 1.45, twist: 0.15, fx: 'paper', weight: 0,
+    geo: new THREE.BoxGeometry(0.18, 0.22, 0.002).translate(0, 0.02 + 0.11, 0),
+    surface: new THREE.MeshStandardMaterial({ color: '#F7F7F2', roughness: 0.9, side: THREE.DoubleSide }),
+    cap: new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.9, side: THREE.DoubleSide }),
+    props: [merged([
+      place(new THREE.BoxGeometry(0.22, 0.02, 0.03), 0, 0.01, 0),
+      place(new THREE.BoxGeometry(0.012, 0.05, 0.012), -0.1, 0.045, 0),
+      place(new THREE.BoxGeometry(0.012, 0.05, 0.012), 0.1, 0.045, 0),
+    ], mat.darkWood)],
+    anim: { slide: 0.07, gap: 0.006, fall: 0.07, spin: 0.5, flutter: 0.6, gapLow: 0.002, tilt: 0.04, hop: 0 },
+    fx: 'paper', weight: 0,
   }),
-  bamboo: () => ({
-    geo: new THREE.CylinderGeometry(0.032, 0.032, 0.36, 9, 6).rotateZ(Math.PI / 2).translate(0, 0.032, 0),
-    material: flat(shade(PALETTES.day.leaf, 1.3), 0.55, { vertexColors: true }),
-    cut: new THREE.Color('#e9f2c4'), // light green-cream fibre
-    halfWidth: 0.18, slide: 0.1, hop: 0.07, topple: 0, twist: 0.6, fx: 'wood', weight: 1,
+  makiwara: () => ({
+    geo: new THREE.CylinderGeometry(0.04, 0.042, 0.26, 12, 4).translate(0, 0.015 + 0.13, 0),
+    surface: new THREE.MeshStandardMaterial({
+      roughness: 0.95,
+      map: canvasTex(128, (g, n) => { // rolled straw mat: fibres + two rope ties
+        g.fillStyle = `#${STRAW.getHexString()}`;
+        g.fillRect(0, 0, n, n);
+        for (let i = 0; i < 70; i++) {
+          g.fillStyle = Math.random() < 0.5 ? 'rgba(255,248,230,0.35)' : 'rgba(90,70,40,0.25)';
+          g.fillRect(Math.random() * n, 0, 1 + Math.random() * 2, n);
+        }
+        g.fillStyle = '#5C5650';
+        for (const y of [0.28, 0.72]) g.fillRect(0, y * n - 3, n, 6);
+      }),
+    }),
+    cap: new THREE.MeshStandardMaterial({
+      roughness: 0.9,
+      map: canvasTex(128, (g, n) => { // cross-section: tight straw spiral around a green bamboo core
+        g.fillStyle = `#${STRAW.getHexString()}`;
+        g.fillRect(0, 0, n, n);
+        g.strokeStyle = 'rgba(110,85,50,0.5)';
+        for (let r = n * 0.16; r < n * 0.5; r += 4) { g.beginPath(); g.arc(n / 2, n / 2, r, 0, Math.PI * 2); g.stroke(); }
+        g.fillStyle = '#C9D8C5';
+        g.beginPath(); g.arc(n / 2, n / 2, n * 0.14, 0, Math.PI * 2); g.fill();
+        g.fillStyle = '#6F8F6A';
+        g.beginPath(); g.arc(n / 2, n / 2, n * 0.09, 0, Math.PI * 2); g.fill();
+      }),
+    }),
+    props: [merged([
+      place(new THREE.CylinderGeometry(0.07, 0.08, 0.015, 10), 0, 0.0075, 0),
+      place(new THREE.CylinderGeometry(0.006, 0.006, 0.05, 6), 0, 0.03, 0),
+    ], mat.darkWood)],
+    anim: { slide: 0.11, gap: 0.012, fall: 0.1, spin: 1.2, flutter: 0, gapLow: 0.002, tilt: 0.05, hop: 0 },
+    fx: 'straw', weight: 1,
   }),
   iron: () => ({
-    geo: new THREE.BoxGeometry(0.32, 0.045, 0.055, 2, 1, 1).translate(0, 0.0225, 0),
-    material: new THREE.MeshStandardMaterial({ color: '#5d6166', metalness: 0.85, roughness: 0.38, flatShading: true, vertexColors: true }),
-    cut: shade(CLIMAX.heat, 2.4), // hot glow at the cut
-    halfWidth: 0.16, slide: 0.06, hop: 0.04, topple: 0, twist: 0.3, fx: 'metal', weight: 2,
+    geo: new THREE.BoxGeometry(0.28, 0.04, 0.045).translate(0, 0.012 + 0.02, 0),
+    surface: new THREE.MeshStandardMaterial({ color: '#5d6166', metalness: 0.85, roughness: 0.38, flatShading: true }),
+    cap: new THREE.MeshStandardMaterial({
+      color: '#8a8f96', metalness: 0.5, roughness: 0.3, emissive: '#ffffff', emissiveIntensity: 2.2,
+      emissiveMap: radialTex([[0, '#FFF2C4'], [0.35, '#F4C95D'], [0.75, '#B04A33'], [1, '#2B2A28']]),
+    }),
+    props: [merged([
+      place(new THREE.BoxGeometry(0.03, 0.012, 0.07), -0.1, 0.006, 0),
+      place(new THREE.BoxGeometry(0.03, 0.012, 0.07), 0.1, 0.006, 0),
+    ], mat.darkWood)],
+    anim: { slide: 0.008, gap: 0.03, fall: 0, spin: 0.12, flutter: 0, gapLow: 0.03, tilt: 0.1, hop: 0.03 },
+    fx: 'metal', weight: 2,
   }),
-  ice: () => {
-    const geo = new THREE.IcosahedronGeometry(0.14, 1);
+  boulder: () => {
+    const geo = flattenBelow(rockGeo(0.1, 1, 0.22).scale(1.25, 0.95, 1.0), -0.06);
+    return {
+      geo,
+      surface: flat(P.stone, 0.92),
+      cap: new THREE.MeshStandardMaterial({
+        roughness: 0.8,
+        map: canvasTex(128, (g, n) => { // fresh granite face: lighter than the weathered skin, speckled
+          g.fillStyle = '#9a968e';
+          g.fillRect(0, 0, n, n);
+          const cols = ['#DCD3C3', '#5C5650', '#7C7A75', '#2B2A28'];
+          for (let i = 0; i < 500; i++) {
+            g.fillStyle = cols[i % 4];
+            g.fillRect(Math.random() * n, Math.random() * n, 1 + Math.random() * 3, 1 + Math.random() * 3);
+          }
+        }),
+      }),
+      props: [],
+      anim: { slide: 0.012, gap: 0.035, fall: 0, spin: 0.35, flutter: 0, gapLow: 0.02, tilt: 0.22, hop: 0.012 },
+      fx: 'rock', weight: 3,
+    };
+  },
+  iceberg: () => {
+    const geo = new THREE.IcosahedronGeometry(0.08, 1);
     const p = geo.attributes.position;
     for (let i = 0; i < p.count; i++) {
       const x = p.getX(i), y = p.getY(i), z = p.getZ(i);
-      const n = 0.82 + hash3(Math.round(x * 1000), Math.round(y * 1000), Math.round(z * 1000)) * 0.32;
-      p.setXYZ(i, x * n * 1.15, Math.max(-0.07, y * n * 1.35) + 0.07, z * n);
+      const n = 0.8 + hash3(Math.round(x * 1000), Math.round(y * 1000), Math.round(z * 1000)) * 0.35;
+      p.setXYZ(i, x * n, y * n * (y > 0 ? 1.6 : 0.7), z * n * 0.9); // a small peaked floe
     }
+    flattenBelow(geo, -0.03);
+    geo.translate(0, 0.008, 0); // floats in its tray
     return {
       geo,
-      material: new THREE.MeshPhysicalMaterial({ color: '#9FB7C9', roughness: 0.12, metalness: 0, clearcoat: 1, flatShading: true, sheen: 0.4, sheenColor: '#ffffff', vertexColors: true }),
-      cut: new THREE.Color('#d8f0ff').multiplyScalar(1.6), // bright blue
-      halfWidth: 0.14, slide: 0.05, hop: 0, topple: 0.3, twist: 0.2, fx: 'ice', weight: 3,
+      surface: new THREE.MeshPhysicalMaterial({ color: '#9FB7C9', roughness: 0.1, metalness: 0, clearcoat: 1, flatShading: true, emissive: '#1C2A3A', envMapIntensity: 1.5 }),
+      cap: new THREE.MeshStandardMaterial({
+        roughness: 0.05, emissive: '#ffffff', emissiveIntensity: 0.9,
+        map: radialTex([[0, '#FFFFFF'], [0.5, '#E8F1F8'], [1, '#9FB7C9']]),
+        emissiveMap: radialTex([[0, '#E8F1F8'], [0.6, '#9FB7C9'], [1, '#1C2A3A']]),
+      }),
+      props: [
+        mesh(new THREE.CylinderGeometry(0.14, 0.13, 0.012, 14).translate(0, 0.006, 0), mat.darkWood),
+        mesh(new THREE.CircleGeometry(0.128, 14).rotateX(-Math.PI / 2).translate(0, 0.0125, 0), mat.water, false, true),
+      ],
+      anim: { slide: 0.06, gap: 0.015, fall: 0.03, spin: 0.55, flutter: 0, gapLow: 0.004, tilt: 0.07, hop: 0 },
+      fx: 'ice', weight: 4,
     };
   },
 };
 
-function buildTarget(key) {
-  const def = TARGET_DEFS[key]();
+const targets = TARGETS.map((t) => {
+  const b = TARGET_BUILD[t.id]();
   const group = new THREE.Group();
   group.position.y = BLOCK_H;
-  const halves = [-1, 1].map((side) => {
-    // Pivot at the outer bottom edge so halves topple outward.
-    const pivot = new THREE.Group();
-    pivot.position.x = side * def.halfWidth;
-    const m = mesh(halfGeometry(def.geo, side, def.cut), def.material);
-    m.position.x = -side * def.halfWidth;
-    pivot.add(m);
-    group.add(pivot);
-    return { pivot, side };
+  b.geo.computeBoundingBox();
+  const box = b.geo.boundingBox;
+  const c = new THREE.Vector3((box.min.x + box.max.x) / 2, (box.min.y + box.max.y) / 2, 0).addScalar(1e-4); // off any vertex
+  const whole = mesh(b.geo, b.surface);
+  const split = splitGeometry(b.geo, c);
+  const halves = split.halves.map((h) => {
+    const m = mesh(h.geo, [b.surface, b.cap]);
+    m.position.copy(h.pivot);
+    m.visible = false;
+    group.add(m);
+    return { mesh: m, home: h.pivot.clone(), side: h.side };
   });
-  if (key === 'bamboo') {
-    const nodeMat = flat('#c4c98c', 0.6);
-    halves.forEach(({ pivot, side }) => {
-      const ring = mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.01, 9).rotateZ(Math.PI / 2), nodeMat);
-      ring.position.set(-side * def.halfWidth + side * 0.1, 0.032, 0);
-      pivot.add(ring);
-    });
+  group.add(whole, ...b.props);
+  group.visible = false;
+  stage.add(group);
+  return {
+    def: t, group, whole, halves, c, sTop: split.sTop, sBottom: split.sBottom, cap: b.cap,
+    capGlow: b.cap.emissiveIntensity ?? 0, anim: b.anim, fx: b.fx, weight: b.weight,
+    height: box.max.y, halfW: Math.max(-box.min.x, box.max.x),
+  };
+});
+
+let stageTarget = targets[0];
+function resetTarget(target) {
+  target.whole.visible = true;
+  for (const h of target.halves) {
+    h.mesh.visible = false;
+    h.mesh.position.copy(h.home);
+    h.mesh.rotation.set(0, 0, 0);
   }
-  if (key === 'paper') {
-    // little clips holding the sheet upright (staging only)
-    halves.forEach(({ pivot, side }) => {
-      const clip = mesh(new THREE.BoxGeometry(0.02, 0.025, 0.02), mat.horn);
-      clip.position.set(-side * def.halfWidth + side * 0.085, 0.0125, 0);
-      pivot.add(clip);
-    });
-  }
-  def.geo.dispose();
-  const height = new THREE.Box3().setFromObject(group).max.y - BLOCK_H;
-  return { group, halves, def, height };
+  target.group.position.set(0, BLOCK_H, 0);
+  target.group.scale.setScalar(1);
+  target.cap.emissiveIntensity = target.capGlow;
+}
+function showStageTarget(i) {
+  targets.forEach((t, k) => {
+    t.group.visible = k === i;
+    if (k === i) resetTarget(t);
+  });
+  stageTarget = targets[i];
 }
 
-function disposeTarget(target) {
-  stage.remove(target.group);
-  target.group.traverse((o) => {
-    if (o.isMesh) {
-      o.geometry.dispose();
-      if (o.material !== mat.horn) o.material.dispose();
+function animatePieces(target, k) {
+  const a = target.anim;
+  const e = easeOutCubic(k);
+  for (const h of target.halves) {
+    const m = h.mesh;
+    m.position.copy(h.home);
+    if (h.side > 0) { // upper piece: slides down the cut, opens, falls, spins
+      m.position.addScaledVector(CUT_D, a.slide * e).addScaledVector(CUT_N, a.gap * e);
+      m.position.y += a.hop * 4 * k * (1 - k) - a.fall * k * k;
+      m.rotation.z = -a.spin * e;
+      m.rotation.x = a.flutter * Math.sin(k * 9) * k;
+    } else {
+      m.position.addScaledVector(CUT_N, -a.gapLow * e);
+      m.position.y += a.hop * 2 * k * (1 - k);
+      m.rotation.z = a.tilt * easeOutBounce(k);
     }
-  });
+  }
 }
 
-function stageWorld(local) {
-  return stage.localToWorld(local.clone());
-}
-
-function impactFX(fx, at, success) {
-  if (fx === 'metal' || (fx === 'ice' && !success)) burst(sparks, at, success ? 30 : 40, 1.2, HEAT_COLORS, 0.45);
+function impactFX(target, at, success) {
+  const fx = target.fx;
+  if (!success) {
+    burst(sparks, at, 14, 0.9, HEAT_COLORS, 0.3); // small clink of sparks
+    if (fx === 'ice') burst(drops, at, 8, 0.5, [ICE_COLOR], 0.5);
+    if (fx === 'rock') burst(drops, at, 8, 0.5, CHIP_COLORS, 0.5);
+    return;
+  }
+  if (fx === 'metal') burst(sparks, at, 36, 1.3, HEAT_COLORS, 0.5);
+  if (fx === 'rock') { burst(drops, at, 30, 0.8, CHIP_COLORS, 0.8); burst(sparks, at, 14, 1.0, HEAT_COLORS, 0.35); }
   if (fx === 'ice') burst(drops, at, 36, 0.9, [ICE_COLOR, DROP_COLOR], 0.9);
-  if (fx === 'wood' && success) burst(drops, at, 14, 0.5, [LEAF_COLOR], 0.6);
-  if (success) burst(glints, at, 10, 0.4, GLINT_COLORS, 0.4);
+  if (fx === 'straw') burst(drops, at, 18, 0.5, STRAW_COLORS, 0.7);
+  if (fx === 'paper') burst(drops, at, 8, 0.25, [ICE_COLOR], 0.6);
+  burst(glints, at, 10, 0.4, GLINT_COLORS, 0.4);
 }
 
-// Hitstop + decaying screen shake (research: cap the stop; shake goes large -> small)
+// Hitstop (true freeze, capped) -> then a camera shake that decays to zero.
 let hitstop = 0;
+let freezeAcc = 0;
 let shake = 0;
 let shakeAmp = 0;
-function impact(weight, success) {
-  hitstop = Math.min(HITSTOP_MAX, success ? 0.05 + weight * 0.025 : 0.04);
-  shake = 1;
-  shakeAmp = success ? 0.006 + weight * 0.003 : 0.008;
+let pendingShake = 0;
+let afterFreeze = 'slash';
+function startHitstop(seconds, amp, next) {
+  hitstop = Math.min(HITSTOP_MAX, seconds);
+  freezeAcc = 0;
+  pendingShake = amp;
+  afterFreeze = next;
+  cine.phase = 'freeze';
 }
 
 const flashEl = document.getElementById('flash');
@@ -1407,130 +1940,216 @@ function flash(color, opacity, ms) {
   }));
 }
 
-async function chop(target, success) {
-  const top = BLOCK_H + target.height;
-  const raised = top + 0.2;
-  chopRig.position.set(0, raised + 0.15, 0);
-  chopRig.rotation.z = 0;
-  chopRig.visible = true;
-  await tween(0.35, (k) => (chopRig.position.y = lerp(raised + 0.15, raised, k)), easeOutCubic);
-  await wait(0.25);
-  audio.whoosh();
-
-  if (success) {
-    // Slow motion -> slash flash + hitstop/shake -> brief stillness -> halves separate -> normal speed.
-    timeScale = 0.15;
-    await tween(0.12, (k) => (chopRig.position.y = lerp(raised, BLOCK_H, k)), easeInCubic);
-    timeScale = 1;
-    audio.slice();
-    impact(target.def.weight, true);
-    flash(CLIMAX.slash, 0.75, 260);
-    if (target.def.fx === 'ice') setTimeout(() => flash(CLIMAX.accent, 0.35, 90), 40); // red: a few frames only
-    await wait(0.35);
-    impactFX(target.def.fx, stageWorld(new THREE.Vector3(0, BLOCK_H + target.height * 0.5, 0)), true);
-    const { slide, hop, topple, twist } = target.def;
-    const pieces = tween(0.8, (k) => {
-      for (const { pivot, side } of target.halves) {
-        const homeX = side * target.def.halfWidth;
-        pivot.position.x = homeX + side * slide * easeOutCubic(k);
-        pivot.position.y = hop * 4 * k * (1 - k);
-        pivot.rotation.z = -side * topple * easeOutBounce(k);
-        pivot.rotation.y = side * twist * easeOutCubic(k);
-      }
-    });
-    await wait(0.25);
-    await tween(0.3, (k) => (chopRig.position.y = lerp(BLOCK_H, raised, k)), easeInOut);
-    await pieces;
-  } else {
-    await tween(0.1, (k) => (chopRig.position.y = lerp(raised, top, k)), easeInCubic);
-    audio.clank();
-    impact(0, false);
-    impactFX(target.def.fx === 'paper' || target.def.fx === 'wood' ? 'none' : target.def.fx, stageWorld(new THREE.Vector3(0, top, 0)), false);
-    toast('彈開了');
-    const baseY = target.group.position.y;
-    await tween(0.7, (k) => {
-      // knife bounces up with a decaying wobble; target shudders
-      chopRig.position.y = top + 0.16 * Math.sin(Math.min(1, k * 1.6) * Math.PI * 0.5) * (1 - k * 0.3);
-      chopRig.rotation.z = Math.sin(k * 26) * 0.3 * (1 - k);
-      target.group.position.x = Math.sin(k * 60) * 0.006 * (1 - k);
-      target.group.position.y = baseY + Math.abs(Math.sin(k * 30)) * 0.004 * (1 - k);
-    });
-    chopRig.rotation.z = 0;
-  }
+/** World position of the point s along the slash line (target space). */
+function slashPoint(s, out) {
+  out.copy(CUT_U).multiplyScalar(s).add(slashRig.position);
+  return stage.localToWorld(out);
 }
 
-async function runTest() {
+async function slashSuccess(target, sHigh) {
+  const sBlock = -target.c.y / CUT_U.y; // where the slash line meets the block
+  const sEnd = Math.max(target.sBottom - 0.01, sBlock + 0.004);
+  let hit = false;
+  await tween(SLASH_TIME, (k) => {
+    const s = lerp(sHigh, sEnd, k);
+    chopRig.position.y = s;
+    if (!hit && s <= target.sTop) {
+      hit = true;
+      // The cut moment: swap the whole mesh for the pre-cut halves, freeze, flash.
+      target.whole.visible = false;
+      for (const h of target.halves) h.mesh.visible = true;
+      startHitstop(target.def.hitstop, 0.005 + target.weight * 0.0025, 'slash');
+      audio.slice();
+      if (target.weight >= 2) audio.boom(target.weight);
+      flash(CLIMAX.slash, 0.75, 260);
+      if (target.weight >= 3) setTimeout(() => flash(CLIMAX.accent, 0.3, 90), 40); // red: a few frames only
+      impactFX(target, slashPoint(target.sTop, tmpP), true);
+    }
+  }, (t) => t * (0.55 + 0.45 * t));
+  cine.phase = 'split';
+  impactFX(target, slashPoint(sEnd + 0.01, tmpP), true);
+  if (target.fx === 'metal') tween(2.5, (k) => (target.cap.emissiveIntensity = lerp(target.capGlow, 0.5, k))); // cut cools
+  const pieces = tween(0.9, (k) => animatePieces(target, k));
+  await waitReal(0.35); // hold the slow motion while the halves start to part
+  await tween(0.4, (k) => (timeScale = lerp(SLOWMO_SCALE, 1, k)), easeInOut, true);
+  tween(0.3, (k) => (chopRig.position.y = lerp(sEnd, sHigh, k)), easeInOut);
+  await pieces;
+}
+
+async function slashFail(target, sHigh) {
+  await tween(SLASH_TIME * 0.6, (k) => (chopRig.position.y = lerp(sHigh, target.sTop, k)), (t) => t * t);
+  startHitstop(FAIL_HITSTOP, 0.009, 'recoil');
+  audio.clink();
+  impactFX(target, slashPoint(target.sTop, tmpP), false);
+  toast('刀被彈開了…再磨利一點', 1.8);
+  await waitReal(FAIL_HITSTOP);
+  tween(0.15, (k) => (timeScale = lerp(SLOWMO_SCALE, 1, k)), easeOutCubic, true);
+  const s0 = target.sTop;
+  await tween(0.75, (k) => {
+    // Blade kicks back up and glances off with a decaying wobble; the target only shudders.
+    const up = Math.sin(Math.min(1, k * 1.8) * Math.PI * 0.5);
+    chopRig.position.y = s0 + 0.14 * up;
+    slashRig.rotation.z = CUT_TILT - 0.3 * up * (1 - k * 0.5) + Math.sin(k * 32) * 0.08 * (1 - k);
+    target.group.position.x = Math.sin(k * 60) * 0.004 * (1 - k);
+  });
+  target.group.position.x = 0;
+  slashRig.rotation.z = CUT_TILT;
+}
+
+/**
+ * The test-cut cinematic for one target: letterbox in -> windup -> slow-motion slash ->
+ * (success) cut freeze + halves part, or (fail) the blade bounces off -> result card.
+ * opts.fail forces the bounce. Resolves with { id, success } (null if a cut is already running).
+ */
+async function runTest(id, opts = {}) {
+  if (game.mode !== 'sharpen' && game.mode !== 'result') return null;
+  const idx = TARGETS.findIndex((t) => t.id === id);
+  if (idx < 0) return null;
+  if (stoneSwitching) {
+    await stoneSwap; // finish the stone swap before the cut (it uses game.stone)
+    if (game.mode !== 'sharpen' && game.mode !== 'result') return null;
+  }
+  const def = TARGETS[idx];
+  const target = targets[idx];
+  const success = !opts.fail && game.sharpness >= def.need - 1e-6;
+  ui.result.classList.remove('show');
   game.mode = 'test';
-  document.body.classList.add('cine');
+  cine.phase = 'enter';
+  cine.target = id;
+  cine.lastHitstopMs = 0;
   drag = second = null;
   sliderPointer = null;
-  audio.setGrind(0, 500);
+  audio.setGrind(0);
   ui.testBtn.disabled = true;
   ui.slider.classList.add('hidden');
   ui.hud.classList.add('hidden');
-  await tween(0.9, (k) => (camBlend = k), easeInOut);
-
-  const passed = [];
-  let failedTier = null;
-  for (const tier of TIERS) {
-    const target = buildTarget(tier.key);
-    target.group.scale.setScalar(0.001);
-    stage.add(target.group);
-    toast(tier.name, 0.8);
-    await tween(0.35, (k) => target.group.scale.setScalar(Math.max(0.001, easeOutBounce(k))));
-    const ok = game.sharpness >= tier.need;
-    await chop(target, ok);
-    if (ok) {
-      passed.push(tier);
-      toast(`${tier.name} ✓`, 0.7);
-    } else {
-      failedTier = tier;
-    }
-    await wait(ok ? 0.5 : 0.4);
-    await tween(0.25, (k) => target.group.scale.setScalar(Math.max(0.001, 1 - k)));
-    disposeTarget(target);
-    if (!ok) break;
-  }
+  document.body.classList.add('cine');
   chopRig.visible = false;
-  showResult(passed, failedTier);
+  showStageTarget(idx);
+  target.group.scale.setScalar(0.001);
+  const c0 = camBlend, b0 = cine.bars;
+  await Promise.all([
+    tween(0.9 * (1 - c0) + 0.01, (k) => (camBlend = lerp(c0, 1, k)), easeInOut),
+    tween(LETTERBOX_IN * (1 - b0) + 0.01, (k) => (cine.bars = lerp(b0, 1, k)), easeInOut, true),
+    wait(0.25).then(() => tween(0.4, (k) => target.group.scale.setScalar(Math.max(0.001, easeOutBounce(k))))),
+  ]);
+  toast(def.name, 0.8);
+
+  cine.phase = 'windup';
+  slashRig.position.copy(target.group.position).add(target.c);
+  slashRig.rotation.z = CUT_TILT;
+  const sHigh = target.sTop + 0.14;
+  chopRig.position.set(0, sHigh + 0.12, 0);
+  chopRig.visible = true;
+  await tween(0.35, (k) => (chopRig.position.y = lerp(sHigh + 0.12, sHigh, k)), easeOutCubic);
+  await tween(0.22, (k) => (chopRig.position.y = sHigh + 0.03 * Math.sin(k * Math.PI) * (1 - k * 0.3)), easeInOut); // anticipation
+
+  cine.phase = 'slash';
+  audio.slowmo();
+  audio.whoosh();
+  await tween(0.1, (k) => (timeScale = lerp(1, SLOWMO_SCALE, k)), easeOutCubic, true);
+  if (success) await slashSuccess(target, sHigh);
+  else await slashFail(target, sHigh);
+  timeScale = 1;
+  await wait(success ? 0.35 : 0.2);
+  return showResult(idx, success);
 }
 
-function showResult(passed, failedTier) {
+function showResult(idx, success) {
+  const def = TARGETS[idx];
   game.mode = 'result';
+  cine.phase = 'result';
+  const before = game.sharpness;
+  if (success) {
+    game.best = Math.max(game.best, idx);
+    dullEdge(def.dull);
+  }
   const pct = Math.round(game.sharpness * 100);
-  ui.resultTitle.textContent = RANKS[passed.length];
-  const lines = [`鋒利度 <b>${pct}%</b>`];
-  lines.push(passed.length ? `成功斬斷：<b>${passed.map((p) => p.name).join('、')}</b>` : '這次連紙都還切不開');
-  if (failedTier) {
-    lines.push(`${failedTier.name}：需要 ${Math.round(failedTier.need * 100)}%，再磨一下就好`);
-    lines.push(`再穩一點：角度保持 ${BAND_LO}°–${BAND_HI}°，讓整條刃口都亮起來。`);
+  ui.resultTitle.textContent = success ? `${def.name}・一刀兩斷` : '彈開了';
+  const lines = [`鋒利度 <b>${pct}%</b>・最高評價 <b>${RANKS[game.best + 1]}</b>`];
+  if (success) {
+    if (def.dull > 0) lines.push(`刃口略有磨損（${Math.round(before * 100)}% → ${pct}%）`);
+    if (idx === TARGETS.length - 1) lines.push('連冰山都一刀兩斷，傳說中的名匠！');
+    else if (idx >= game.unlocked || game.sharpness < TARGETS[idx + 1].need - 1e-6) lines.push(`${TARGETS[idx + 1].name} 需要 ${Math.round(TARGETS[idx + 1].need * 100)}%，繼續磨吧`);
   } else {
-    lines.push('連冰山都一刀兩斷，傳說中的名匠！');
+    lines.push('刀被彈開了…再磨利一點');
+    lines.push(`${def.name} 需要 <b>${Math.round(def.need * 100)}%</b>，目前 ${pct}%`);
+    const st = STONES[game.stone];
+    const need = STONES.find((s) => s.cap >= def.need);
+    if (need && st.cap < def.need) lines.push(`${st.name}砥最多 ${Math.round(st.cap * 100)}%，要換「${need.name}」砥（${need.grit}）`);
+    else lines.push(`角度保持 ${BAND_LO}°–${BAND_HI}°，讓整條刃口都亮起來。`);
   }
   ui.resultBody.innerHTML = lines.join('<br>');
+  // "Next" goes to the next unlocked target after a success, otherwise retries this one.
+  const next = success && idx < game.unlocked && game.sharpness >= TARGETS[idx + 1].need ? idx + 1 : idx;
+  game.selected = next;
+  ui.nextBtn.textContent = next !== idx ? `下一個：${TARGETS[next].name}` : '再切一次';
+  refreshTargets();
   ui.result.classList.add('show');
+  cine.lastResult = { id: def.id, success, sharpness: game.sharpness, hitstopMs: cine.lastHitstopMs };
+  return cine.lastResult;
 }
 
 async function backToSharpen(reset) {
+  if (game.mode !== 'result') return;
+  game.mode = 'exit';
+  cine.phase = 'exit';
   ui.result.classList.remove('show');
-  document.body.classList.remove('cine');
+  timeScale = 1;
   if (reset) {
     seg.progress.fill(0);
     seg.level.fill(0);
     seg.flash.fill(0);
     game.sharpness = 0;
     game.stage = 0;
+    game.unlocked = 0;
+    game.selected = 0;
+    game.best = -1;
     setAngle(START_ANGLE);
     game.knifeX = game.knifeTargetX = 0;
-    game.wet = 0;
+    for (const s of stones) {
+      s.wear.fill(0);
+      s.wet01 = 0;
+      applyStoneWear(s);
+    }
+    selectStone(0, true);
+    setKnifeFinish(0);
   }
   game.pressure = 0;
   game.speed = 0;
-  await tween(0.8, (k) => (camBlend = 1 - k), easeInOut);
+  const c0 = camBlend, b0 = cine.bars;
+  await Promise.all([
+    tween(0.8, (k) => (camBlend = lerp(c0, 0, k)), easeInOut),
+    tween(LETTERBOX_IN * b0 + 0.01, (k) => (cine.bars = lerp(b0, 0, k)), easeInOut, true),
+  ]);
+  chopRig.visible = false;
+  document.body.classList.remove('cine');
   ui.hud.classList.remove('hidden');
   ui.slider.classList.remove('hidden');
   ui.testBtn.disabled = false;
+  refreshTargets();
+  showStageTarget(game.selected);
+  cine.target = null;
+  cine.phase = 'idle';
   game.mode = 'sharpen';
+}
+
+// ---------------------------------------------------------------------------
+// Letterbox: bars sized from the real viewport so the visible area is exactly LETTERBOX_ASPECT
+// (top/bottom bars when the screen is narrower, e.g. portrait phones; side bars when wider).
+// ---------------------------------------------------------------------------
+let lbW = -1, lbH = -1, lbA = -1;
+cine.barV = 0;
+cine.barH = 0;
+function updateLetterbox() {
+  const W = window.innerWidth, H = window.innerHeight, a = cine.bars;
+  if (W === lbW && H === lbH && a === lbA) return;
+  lbW = W; lbH = H; lbA = a;
+  const aspect = W / H;
+  cine.barV = (aspect < LETTERBOX_ASPECT ? (H - W / LETTERBOX_ASPECT) / 2 : 0) * a;
+  cine.barH = (aspect > LETTERBOX_ASPECT ? (W - H * LETTERBOX_ASPECT) / 2 : 0) * a;
+  ui.bars[0].style.height = ui.bars[1].style.height = `${cine.barV}px`;
+  ui.bars[2].style.width = ui.bars[3].style.width = `${cine.barH}px`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1539,11 +2158,11 @@ async function backToSharpen(reset) {
 let camBlend = 0; // 0 = whetstone view, 1 = test stage view
 const SHARPEN_DIR = new THREE.Vector3(0.12, 0.8, 0.6).normalize();
 const STAGE_DIR = new THREE.Vector3(0.62, 0.42, 0.66).normalize();
+const deg2rad = THREE.MathUtils.degToRad;
 
-function fitDistance(halfW, halfH) {
-  const vf = THREE.MathUtils.degToRad(camera.fov) / 2;
-  const hf = Math.atan(Math.tan(vf) * camera.aspect);
-  return Math.max(halfW / Math.tan(hf), halfH / Math.tan(vf));
+function fitDistance(halfW, halfH, fovDeg, aspect) {
+  const tv = Math.tan(deg2rad(fovDeg) / 2);
+  return Math.max(halfW / (tv * aspect), halfH / tv);
 }
 
 const camA = new THREE.Vector3();
@@ -1552,25 +2171,39 @@ const lookA = new THREE.Vector3();
 const lookB = new THREE.Vector3();
 
 function updateCamera(t, realDt) {
-  const portrait = camera.aspect < 1;
+  const aspect = camera.aspect;
+  const portrait = aspect < 1;
+  const fovA = portrait ? 55 : 45;
+  // Cinematic lens: the 2.39:1 window has a CINE_HFOV horizontal FOV; the full frame's vertical FOV is
+  // derived from how much of the screen height that window covers, so the subject fits inside the bars.
+  const tanH = Math.tan(deg2rad(CINE_HFOV) / 2);
+  const tanVBand = tanH / LETTERBOX_ASPECT;
+  const fovB = THREE.MathUtils.radToDeg(2 * Math.atan(tanVBand / Math.min(1, aspect / LETTERBOX_ASPECT)));
+  const fov = lerp(fovA, fovB, camBlend);
+  if (Math.abs(fov - camera.fov) > 1e-4) {
+    camera.fov = fov;
+    camera.updateProjectionMatrix();
+  }
   // Look slightly above the stone on portrait so the HUD doesn't cover it.
   lookA.set(STATION_X + (portrait ? 0.09 : 0.06), TABLE_TOP + (portrait ? 0.05 : 0.03), 0.04);
-  camA.copy(lookA).addScaledVector(SHARPEN_DIR, fitDistance(portrait ? 0.26 : 0.46, portrait ? 0.16 : 0.26));
-  lookB.set(stage.position.x, STAGE_TOP + 0.14, stage.position.z);
-  camB.copy(lookB).addScaledVector(STAGE_DIR, fitDistance(portrait ? 0.3 : 0.45, portrait ? 0.3 : 0.38));
+  camA.copy(lookA).addScaledVector(SHARPEN_DIR, fitDistance(portrait ? 0.26 : 0.46, portrait ? 0.16 : 0.26, fovA, aspect));
+  const tg = stageTarget;
+  lookB.set(stage.position.x, STAGE_TOP + BLOCK_H + tg.height * 0.5, stage.position.z);
+  camB.copy(lookB).addScaledVector(STAGE_DIR, Math.max((tg.halfW + 0.12) / tanH, (tg.height * 0.5 + 0.06) / tanVBand));
 
   camera.position.lerpVectors(camA, camB, camBlend);
   camera.position.x += Math.sin(t * 0.5) * 0.006;
   camera.position.y += Math.sin(t * 0.37 + 1) * 0.004;
   camera.position.z += Math.cos(t * 0.41) * 0.004;
-  if (shake > 0) {
-    const a = shakeAmp * shake * shake; // decays large -> small
-    camera.position.x += (Math.random() - 0.5) * 2 * a;
-    camera.position.y += (Math.random() - 0.5) * 2 * a;
-    shake = Math.max(0, shake - realDt / 0.35);
-  }
   lookA.lerp(lookB, camBlend);
   camera.lookAt(lookA);
+  if (shake > 0) {
+    const a = shakeAmp * shake * shake; // decays large -> small, reaches exactly zero
+    camera.position.x += (Math.random() - 0.5) * 2 * a;
+    camera.position.y += (Math.random() - 0.5) * 2 * a;
+    camera.rotateZ((Math.random() - 0.5) * a * 6);
+    shake = Math.max(0, shake - realDt / SHAKE_TIME);
+  }
 }
 
 // Day/dusk palette blends toward the climax palette as the camera moves to the test stage.
@@ -1596,7 +2229,6 @@ function updateAtmosphere(t) {
 function onResize() {
   const w = window.innerWidth, h = window.innerHeight;
   camera.aspect = w / h;
-  camera.fov = camera.aspect < 1 ? 55 : 45;
   camera.updateProjectionMatrix();
   renderer.setPixelRatio(pixelRatio());
   renderer.setSize(w, h);
@@ -1607,14 +2239,35 @@ window.addEventListener('orientationchange', () => setTimeout(onResize, 250));
 window.visualViewport?.addEventListener('resize', onResize);
 onResize();
 
-// Debug: ?demo=0.8 starts with that sharpness and runs the test cut immediately.
-if (params.has('demo')) {
-  seg.progress.fill(clamp(parseFloat(params.get('demo')) || 0, 0, 1));
-  for (let i = 0; i < SEGS; i++) seg.level[i] = SEG_LEVELS.filter((l) => seg.progress[i] >= l).length;
-  game.sharpness = seg.progress[0];
+// ---------------------------------------------------------------------------
+// Initial state
+// ---------------------------------------------------------------------------
+/** Debug: set every edge segment to v (0–1, or a percentage if > 1; no dings); unlocks are recomputed exactly from v. */
+function setSharpness(v) {
+  v = Number(v) || 0;
+  if (v > 1) v /= 100;
+  v = clamp(v, 0, 1);
+  seg.progress.fill(v);
+  for (let i = 0; i < SEGS; i++) seg.level[i] = SEG_LEVELS.filter((l) => v >= l - 1e-6).length;
+  game.sharpness = v;
   game.stage = seg.level[0];
-  setKnifeFinish(game.sharpness);
-  runTest();
+  setKnifeFinish(v);
+  game.unlocked = 0;
+  while (game.unlocked < TARGETS.length - 1 && v >= TARGETS[game.unlocked + 1].need - 1e-6) game.unlocked++;
+  game.selected = Math.min(game.selected, game.unlocked);
+  refreshTargets();
+  if (game.mode === 'sharpen') showStageTarget(game.selected);
+  return v;
+}
+
+selectStone(0, true);
+refreshTargets();
+showStageTarget(0);
+
+// Debug: ?demo=0.8 starts with that sharpness and cuts the hardest unlocked target immediately.
+if (params.has('demo')) {
+  setSharpness(parseFloat(params.get('demo')));
+  runTest(TARGETS[game.unlocked].id);
 }
 
 // ---------------------------------------------------------------------------
@@ -1624,12 +2277,12 @@ const clock = new THREE.Clock();
 const FPS_N = 60;
 const frameTimes = new Float32Array(FPS_N);
 let frameIdx = 0, frameCount = 0, frameSum = 0;
+let simT = 0; // world time: stops during the hitstop, slows during slow motion
 window.__fps = 0;
 
 function frame() {
   const rawDt = clock.getDelta();
   const realDt = Math.min(rawDt, 0.05); // simulation step (clamped after stalls)
-  const t = clock.elapsedTime;
 
   // Rolling FPS average from the true frame time (allocation-free ring buffer)
   frameSum += rawDt - frameTimes[frameIdx];
@@ -1638,26 +2291,39 @@ function frame() {
   frameCount = Math.min(FPS_N, frameCount + 1);
   window.__fps = frameSum > 0 ? Math.round((frameCount / frameSum) * 10) / 10 : 0;
 
-  // Hitstop: the world nearly freezes (still creeping), then resumes.
+  // Hitstop: the world is frozen for exactly `hitstop` seconds (leftover frame time carries on),
+  // then the camera shake starts.
   let dt = realDt;
   if (hitstop > 0) {
-    hitstop -= realDt;
-    dt = realDt * 0.05;
+    const frozen = Math.min(hitstop, realDt);
+    hitstop -= frozen;
+    freezeAcc += frozen;
+    dt = realDt - frozen;
+    if (hitstop <= 1e-9) {
+      hitstop = 0;
+      cine.lastHitstopMs = Math.round(freezeAcc * 1000);
+      shake = 1;
+      shakeAmp = pendingShake;
+      if (cine.phase === 'freeze') cine.phase = afterFreeze;
+    }
   }
+  const gdt = dt * timeScale;
+  simT += gdt;
 
-  updateTweens(dt * timeScale);
-  if (game.mode === 'sharpen') updateSharpening(dt, t);
+  updateTweens(gdt, realDt);
+  if (game.mode === 'sharpen') updateSharpening(dt, simT);
   else game.pressure = damp(game.pressure, 0, 6, dt);
-  updateGleam(dt, t);
+  updateGleam(gdt, simT);
   updateHUD();
-  updateAtmosphere(t);
+  updateAtmosphere(simT);
+  updateLetterbox();
 
   const floorY = camBlend > 0.5 ? STAGE_TOP + BLOCK_H : TABLE_TOP;
-  sparks.update(dt * timeScale, floorY);
-  drops.update(dt * timeScale, floorY);
-  glints.update(dt * timeScale, -10);
-  bamboo.update(t);
-  updateCamera(t, realDt);
+  sparks.update(gdt, floorY);
+  drops.update(gdt, floorY);
+  glints.update(gdt, -10);
+  bamboo.update(simT);
+  updateCamera(simT, realDt);
   renderer.render(scene, camera);
 }
 renderer.setAnimationLoop(frame);
@@ -1665,7 +2331,7 @@ renderer.setAnimationLoop(frame);
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     renderer.setAnimationLoop(null);
-    audio.setGrind(0, 500);
+    audio.setGrind(0);
     audio.ctx?.suspend();
   } else {
     clock.getDelta(); // drop the hidden interval
@@ -1685,4 +2351,44 @@ window.__game = {
   get segments() { return Array.from(seg.progress); },
   get stage() { return game.stage; },
   band: [BAND_LO, BAND_HI],
+};
+window.__knife = {
+  get phase() { return cine.phase; }, // idle | enter | windup | slash | freeze | split | recoil | result | exit
+  get mode() { return game.mode; },
+  get letterbox() {
+    const W = window.innerWidth, H = window.innerHeight;
+    const vw = W - 2 * cine.barH, vh = H - 2 * cine.barV;
+    return { amount: cine.bars, barPx: cine.barV, sidePx: cine.barH, visibleHeightRatio: vh / H, visibleWidthRatio: vw / W, visibleAspect: vw / vh, targetAspect: LETTERBOX_ASPECT };
+  },
+  get target() { return cine.target ?? TARGETS[game.selected].id; },
+  get selected() { return TARGETS[game.selected].id; },
+  get unlocked() { return TARGETS.slice(0, game.unlocked + 1).map((t) => t.id); },
+  get timeScale() { return timeScale; },
+  get hitstop() { return hitstop; },
+  get lastHitstopMs() { return cine.lastHitstopMs; },
+  get shake() { return shake; },
+  get lastResult() { return cine.lastResult; },
+  get sharpness() { return game.sharpness; },
+  get stone() { return STONES[game.stone].id; },
+  get wear() { return Object.fromEntries(stones.map((s) => [s.def.id, Math.max(...s.wear)])); },
+  get halvesVisible() { return stageTarget.halves.every((h) => h.mesh.visible) && !stageTarget.whole.visible; },
+  targets: TARGETS,
+  stones: STONES,
+  constants: { SLOWMO_SCALE, HITSTOP_MAX, FAIL_HITSTOP, LETTERBOX_ASPECT, CUT_TILT_DEG: 30, BAND: [BAND_LO, BAND_HI] },
+  /** Run the test-cut cinematic (bypasses the lock; below the requirement it bounces). opts.fail forces a bounce. */
+  testCut(id = TARGETS[game.selected].id, opts = {}) { return runTest(id, opts); },
+  /** Snapshot for headless tests. */
+  state() {
+    return {
+      mode: game.mode, phase: cine.phase, cinePhase: cine.phase, timeScale, hitstop, lastHitstopMs: cine.lastHitstopMs,
+      shake, letterbox: this.letterbox, target: this.target, selected: this.selected, unlocked: this.unlocked,
+      sharpness: game.sharpness, angle: game.angle, pressure: game.pressure, stone: this.stone, wear: this.wear,
+      halvesVisible: this.halvesVisible, lastResult: cine.lastResult, fps: window.__fps,
+    };
+  },
+  /** Debug only. */
+  setSharpness,
+  setAngle(a) { setAngle(Number(a)); return game.angle; },
+  setStone(id) { selectStone(stoneIndex(id)); return STONES[game.stone].id; },
+  back(reset = false) { return backToSharpen(reset); },
 };
