@@ -44,12 +44,17 @@ python3 -m http.server 8000
 | --- | --- |
 | `?time=day` / `?time=dusk` | 指定色板（預設依當地時間：17:00–06:00 為黃昏） |
 | `?demo=0.8` | 除錯：以指定鋒利度直接開始試刀 |
+| `?fps=1` | 畫面底部顯示幀率（目前／中位數／最差 1%）、畫質等級、像素比、陰影圖大小、繪製呼叫數，給實機量測用 |
+| `?quality=0`–`3` | 固定畫質等級（0 低、1 中、2 高、3 極），關閉自動調整 |
 
 ## 效能與自動測試
 
-- 像素比上限：桌面 `min(devicePixelRatio, 2)`、手機 1.5；陰影圖手機 1024（PCFShadowMap）、桌面 2048（PCFSoftShadowMap）；只有太陽投影，行灯點光源不投影。
-- 場景以合併幾何（`mergeGeometries`）與 instancing 減少繪製呼叫；粒子為固定池（手機每組 ≤ 120），主迴圈不配置新物件；HUD 只在數值改變時寫 DOM；分頁隱藏時暫停繪製與音訊。
-- 測試掛鉤：`window.__game`（getter：`sharpness`、`angle`、`pressure`、`phase`＝`sharpen`/`test`/`result`，另有 `segments`、`stage`、`band`）與 `window.__fps`（最近 60 幀實際幀率平均）。
+- **自動畫質**（`perf.js`）：四級 低／中／高／極（像素比 1／1.25／1.5／2、陰影圖 512／1024／1024／2048、粒子 45%／70%／100%／100%、浮塵、HUD 毛玻璃）。手機從「高」開始（＝之前的固定設定）、桌面從「極」開始；每 2 秒判斷一次：中位數 < 50 fps 或最差 1% < 28 fps 就降一級（降過的等級本次不再嘗試），穩定 60 fps 6 秒就試著升一級；試刀演出中不調整；記住這台裝置上次的等級（localStorage `knife.quality`）。
+- 靜態場景在載入後依材質一次合併（`batchStatic`），刀的鋼製零件合併成一個網格，空的粒子池不繪製，竹林不投影（量測在所有鏡頭都看不到它的影子）：每幀繪製呼叫 66 → 44、三角形 3.7 萬 → 2.95 萬，畫面不變。
+- 開場先編譯所有著色器（含隱藏的試刀目標、切面、粒子），第一次試刀不會因編譯而卡頓。
+- 只有太陽投影，行灯點光源不投影；粒子為固定池；主迴圈不配置新物件；HUD 只在數值改變時寫 DOM；分頁隱藏時暫停繪製與音訊。
+- 測試掛鉤：`window.__game`（getter：`sharpness`、`angle`、`pressure`、`phase`＝`sharpen`/`test`/`result`，另有 `segments`、`stage`、`band`）；`window.__fps`（數字＝最近 60 幀平均，`.report()`＝`{ median, p1low, worstMs, frames }`，`.reset()` 重新開始量測）；`window.__perf()`（繪製呼叫、三角形、記憶體、畫質狀態）；`window.__quality`（`.state()`、`.set(i)`）。
+- 效能量測：`node tests/perf/measure.mjs <輸出資料夾> --label before`（無頭 iPhone 13，統計每幀繪製呼叫／三角形／JS 毫秒並截圖）；`node tests/perf/governor.mjs`（畫質調整邏輯單元測試）。無頭 Chromium 用軟體繪圖，fps 不代表實機，見 `NOTES_perf.md`。
 
 ## 模型與素材授權
 
@@ -91,3 +96,4 @@ python3 -m http.server 8000
 - 2026-10-26 | who: Executor via Grok Bot | reviewer: OpenAI Codex CLI (gpt-6-luna)（對照 main.js 查核數值） | what: 新增 UNITY_PORT.md（網頁機制 → Unity C# 對照＋單一參數表＋評分表） | why: 之後移植到 KnifeProto
 - 2026-10-26 | who: Executor via OpenAI Codex CLI (gpt-5.6-terra)（Claude 額度用完至 12:20，代為主寫） | reviewer: OpenAI Codex CLI (gpt-6-luna)（初審＋修正後重審，無新回歸） | what: 第 5 輪：低多邊形日式工房打磨（行灯暖光微閃、白天／黃昏光線分調、暖簾擺動、障子格窗、地板細節、竹林搖曳、光中浮塵 手機 12 點／桌面 48 點）；委託多樣化（更多客人與刀種文案：牛刀、三德刀、出刃、柳刃、菜切、中式菜刀，程式繪製客人頭像，高 DPR 清晰）；WebAudio 音效精修（依砥石變化的磨刀聲、按鈕聲、客人來店鈴、S/A/B/C 結果音、低音量環境聲） | why: 待辦 (5) 場景打磨與 (8) 委託／音效；無頭流程測試 2 件委託＋自由試刀冰山皆通過、無主控台錯誤、無捲動
 - 2026-10-26 | who: Executor via OpenAI Codex CLI (gpt-5.6-terra)（Claude 額度用完至 12:20，代為主寫） | reviewer: OpenAI Codex CLI (gpt-6-luna) | what: 第 6 輪：結果卡「分享成績」（先渲染再擷取畫面＋疊加分數／評價／目標文字成 PNG，支援 navigator.share 分享檔案，否則下載；測試掛鉤 window.__knife.shareBlob()）；震動回饋（navigator.vibrate，不支援時如 iOS 靜默略過；磨刀時依壓力 8–25ms 短震、每 120ms 最多一次，刃鳴 30ms，試刀頓幀 [60,40,120]，彈刀 [40]；標題畫面「震動：開／關」並記在 localStorage）；中／細砥石研ぎ汁（泥漿）讓石面逐漸變深，換石與新委託時重置 | why: 研究延後清單的截圖分享、震動回饋、研ぎ汁視覺；審查 1 項 major（iOS 分享前等待 PNG 編碼可能失去使用者手勢、分享失敗時沒有改下載）已採納但未修：修正時 Codex 額度用完，列為下一輪第一件
+- 2026-10-26 | who: claude-cloud-perf via Claude Code cloud (Claude Opus 5.5) | reviewer: 待指派（不同模型） | what: 效能線第 7 輪：新增 `perf.js`（幀時間量測 `window.__fps.report()` 中位數／最差 1%、四級自動畫質＋記住裝置等級、靜態場景依材質合併、`?fps=1` 實機疊加顯示、最低級關閉 HUD 毛玻璃）；刀的鋼製零件合併、空粒子池不繪製、竹林不投影、開場預先編譯所有著色器；`tests/perf/measure.mjs`、`tests/perf/governor.mjs` | why: 目標 iPhone 13 穩定 60fps；每幀繪製呼叫 66 → 44、三角形 3.7 萬 → 2.95 萬、畫面前後截圖一致

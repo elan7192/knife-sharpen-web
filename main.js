@@ -1,11 +1,14 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { createFpsMeter, createQualityGovernor, batchStatic, createFpsOverlay, setLowFx } from './perf.js';
 
 // ---------------------------------------------------------------------------
 // URL options
 //   ?time=day|dusk  force a palette (default: dusk between 17:00 and 06:00)
 //   ?demo=0.8       debug: start with that sharpness and run the test cut immediately
+//   ?fps=1          on-screen fps meter (median / worst 1% / quality level) for real-device checks
+//   ?quality=0-3    pin a render quality level (0 低 1 中 2 高 3 極); default: automatic
 // Everything in the scene is procedural geometry: no model, texture or HDRI files are loaded.
 // ---------------------------------------------------------------------------
 const params = new URLSearchParams(location.search);
@@ -136,7 +139,26 @@ const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
 // ---------------------------------------------------------------------------
 const app = document.getElementById('app');
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-const pixelRatio = () => Math.min(window.devicePixelRatio || 1, isMobile ? 1.5 : 2);
+// Render quality levels (low -> high). Touch devices start at 高 (the previous fixed mobile settings) and may
+// probe 極; desktops start at 極 (the previous desktop settings). The governor in perf.js steps down when the
+// frame rate sags and never re-probes a level that failed. shadowEvery: refresh the sun's shadow map every
+// N frames; particles: share of emitted particles kept; dust: share of the light motes drawn; hudBlur: HUD backdrop blur.
+const QUALITY = [
+  { name: '低', dpr: 1, shadow: 512, shadowEvery: 2, particles: 0.45, dust: 0, bambooEvery: 2, hudBlur: false },
+  { name: '中', dpr: 1.25, shadow: 1024, shadowEvery: 1, particles: 0.7, dust: 0.5, bambooEvery: 1, hudBlur: true },
+  { name: '高', dpr: 1.5, shadow: 1024, shadowEvery: 1, particles: 1, dust: 1, bambooEvery: 1, hudBlur: true },
+  { name: '極', dpr: 2, shadow: 2048, shadowEvery: 1, particles: 1, dust: 1, bambooEvery: 1, hudBlur: true },
+];
+const fpsMeter = createFpsMeter();
+const quality = createQualityGovernor({
+  levels: QUALITY,
+  start: isMobile ? 2 : 3,
+  pinned: /^[0-3]$/.test(params.get('quality') ?? '') ? Number(params.get('quality')) : null,
+  apply: (q) => applyQuality(q), // defined once the scene exists; only called after the first frame
+  canChange: () => game.mode === 'sharpen' || game.mode === 'result', // never mid-cinematic
+  storageKey: 'knife.quality', // start where this device settled last time
+});
+const pixelRatio = () => Math.min(window.devicePixelRatio || 1, quality.level.dpr);
 renderer.setPixelRatio(pixelRatio());
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -144,6 +166,7 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.0;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = isMobile ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
+renderer.shadowMap.autoUpdate = false; // refreshed from frame() every quality.level.shadowEvery frames
 app.appendChild(renderer.domElement);
 const canvas = renderer.domElement;
 
@@ -202,7 +225,7 @@ scene.add(hemi);
 const sun = new THREE.DirectionalLight(P.sun, P.sunI);
 sun.position.set(TIME === 'dusk' ? -3.2 : 2.2, TIME === 'dusk' ? 2.6 : 4.5, 2.0);
 sun.castShadow = true;
-sun.shadow.mapSize.setScalar(isMobile ? 1024 : 2048);
+sun.shadow.mapSize.setScalar(quality.level.shadow);
 Object.assign(sun.shadow.camera, { left: -2.5, right: 2.5, top: 2.5, bottom: -2.5, near: 0.5, far: 12 });
 sun.shadow.bias = -0.0004;
 sun.shadow.normalBias = 0.02;
@@ -570,8 +593,8 @@ const bamboo = (() => {
   const nodeMesh = new THREE.InstancedMesh(nodeGeo, flat(P.moss, 0.7, { side: THREE.DoubleSide }), totalSegs);
   const LEAVES_PER = 14;
   const leafMesh = new THREE.InstancedMesh(leafGeo, flat(P.leaf, 0.8, { side: THREE.DoubleSide }), stalks.length * LEAVES_PER);
-  segMesh.castShadow = true;
-  leafMesh.castShadow = true;
+  // No shadow casting: the grove sits outside the sun's shadow box in every camera view (measured: 0 pixels
+  // change in day / dusk, title / sharpen / test-cut), so its ~7.9k shadow-pass triangles bought nothing.
   const color = new THREE.Color();
   let k = 0;
   stalks.forEach((s, si) => {
@@ -748,14 +771,16 @@ function buildKnife() {
   const gleam = mesh(gleamGeo, gleamMat, false, false);
   gleam.renderOrder = 2;
   const HY = BLADE_H - 0.015; // handle axis height (in line with the spine)
-  const bolster = mesh(new THREE.CapsuleGeometry(0.0065, 0.016, 4, 12).scale(1.3, 1.35, 0.62), mat.steel);
-  bolster.position.set(-0.004, HY - 0.003, 0);
   const handle = mesh(new THREE.CapsuleGeometry(0.0115, 0.1, 4, 14).rotateZ(Math.PI / 2).scale(1, 1, 0.72), mat.handle);
   handle.position.set(-0.07, HY, 0);
-  const rivets = merged([-0.03, -0.065, -0.1].map((x) => place(new THREE.CylinderGeometry(0.0022, 0.0022, 0.0175, 8), x, HY, 0, Math.PI / 2)), mat.steel, false, false);
-  const butt = mesh(new THREE.SphereGeometry(0.0085, 10, 6).scale(0.6, 1.1, 0.75), mat.steel);
-  butt.position.set(-0.128, HY + 0.0005, 0);
-  knife.add(blade, gleam, bolster, handle, rivets, butt);
+  // Bolster, rivets and butt cap share the steel material: one draw (smooth normals kept per part).
+  const steelGeo = mergeGeometries([
+    place(new THREE.CapsuleGeometry(0.0065, 0.016, 4, 12), -0.004, HY - 0.003, 0, 0, 0, 0, 1.3, 1.35, 0.62),
+    ...[-0.03, -0.065, -0.1].map((x) => place(new THREE.CylinderGeometry(0.0022, 0.0022, 0.0175, 8), x, HY, 0, Math.PI / 2)),
+    place(new THREE.SphereGeometry(0.0085, 10, 6), -0.128, HY + 0.0005, 0, 0, 0, 0, 0.6, 1.1, 0.75),
+  ]);
+  const steel = mesh(steelGeo, mat.steel);
+  knife.add(blade, gleam, handle, steel);
   return knife;
 }
 
@@ -830,7 +855,7 @@ const dust = (() => {
   geo.setAttribute('position', new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage));
   const points = new THREE.Points(geo, new THREE.PointsMaterial({ map: dotTex, color: P.glow, size: 0.018, transparent: true, opacity: 0.24, depthWrite: false }));
   points.frustumCulled = false; points.visible = count > 0; scene.add(points);
-  return { update(t) {
+  return { points, count, update(t) {
     if (!count) return;
     for (let i = 0; i < count; i++) {
       const n = i * 3, p = phase[i];
@@ -854,6 +879,8 @@ class Particles {
     this.base = new Float32Array(max * 3);
     this.cursor = 0;
     this.alive = 0;
+    this.budget = 1; // quality level: share of emitted particles that are kept
+    this.budgetAcc = 0;
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(this.pos, 3).setUsage(THREE.DynamicDrawUsage));
     geo.setAttribute('color', new THREE.BufferAttribute(this.col, 4).setUsage(THREE.DynamicDrawUsage));
@@ -866,6 +893,11 @@ class Particles {
   }
 
   emit(p, v, color, life) {
+    if (this.budget < 1) { // even thinning, so bursts keep their shape with fewer points
+      this.budgetAcc += this.budget;
+      if (this.budgetAcc < 1) return;
+      this.budgetAcc -= 1;
+    }
     const i = this.cursor;
     const i3 = i * 3;
     this.cursor = (this.cursor + 1) % this.max;
@@ -874,6 +906,7 @@ class Particles {
     this.base[i3] = color.r; this.base[i3 + 1] = color.g; this.base[i3 + 2] = color.b;
     this.life[i] = this.maxLife[i] = life;
     this.alive = this.max;
+    this.points.visible = true;
   }
 
   update(dt, floorY) {
@@ -905,6 +938,7 @@ class Particles {
       this.col[i4 + 3] = Math.min(1, (this.life[i] / this.maxLife[i]) * 1.5);
     }
     this.alive = alive;
+    this.points.visible = alive > 0; // an empty pool costs no draw call
     this.points.geometry.attributes.position.needsUpdate = true;
     this.points.geometry.attributes.color.needsUpdate = true;
   }
@@ -2739,12 +2773,45 @@ function onResize() {
   camera.updateProjectionMatrix();
   renderer.setPixelRatio(pixelRatio());
   renderer.setSize(w, h);
+  renderer.shadowMap.needsUpdate = true;
+  quality.settle(); // a resize / rotation reallocates buffers: don't judge those frames
   if (drag) drag.ppu = stonePixelsPerUnit();
 }
 window.addEventListener('resize', onResize);
 window.addEventListener('orientationchange', () => setTimeout(onResize, 250));
 window.visualViewport?.addEventListener('resize', onResize);
 onResize();
+
+// ---------------------------------------------------------------------------
+// Performance setup (perf.js): merge the static scenery, warm every shader, apply the quality level
+// ---------------------------------------------------------------------------
+// Everything that moves, swaps or animates stays as it is; the rest is merged per material.
+const batchStats = batchStatic(scene, new Set([knifeRoot, slashRig, ...stones.map((s) => s.mesh), ...norenPanels.map((n) => n.pivot), ...targets.map((t) => t.group)]));
+
+// Compile every program now (targets, cut halves, test knife and particle pools are hidden at first), so the
+// first spark or the first test cut never stalls on a shader compile in the middle of the climax.
+{
+  const hidden = [];
+  scene.traverse((o) => { if (!o.visible) { hidden.push(o); o.visible = true; } });
+  renderer.compile(scene, camera);
+  hidden.forEach((o) => (o.visible = false));
+  for (const ps of [sparks, drops, glints]) ps.points.visible = false; // empty pools: no draw until they emit
+}
+
+function applyQuality(q) {
+  sparks.budget = drops.budget = glints.budget = q.particles;
+  dust.points.geometry.setDrawRange(0, Math.round(dust.count * q.dust));
+  dust.points.visible = dust.count * q.dust >= 1;
+  if (sun.shadow.mapSize.x !== q.shadow) {
+    sun.shadow.mapSize.setScalar(q.shadow);
+    sun.shadow.map?.dispose();
+    sun.shadow.map = null; // re-allocated at the new size on the next shadow render
+  }
+  renderer.shadowMap.needsUpdate = true;
+  setLowFx(!q.hudBlur);
+  onResize(); // pixel ratio
+}
+applyQuality(quality.level);
 
 // ---------------------------------------------------------------------------
 // Initial state
@@ -2783,22 +2850,18 @@ if (params.has('demo')) {
 // Main loop (paused while the tab is hidden)
 // ---------------------------------------------------------------------------
 const clock = new THREE.Clock();
-const FPS_N = 60;
-const frameTimes = new Float32Array(FPS_N);
-let frameIdx = 0, frameCount = 0, frameSum = 0;
 let simT = 0; // world time: stops during the hitstop, slows during slow motion
-window.__fps = 0;
+// window.__fps: still a number (rolling 60-frame average) for old checks; .report() gives median / worst 1%.
+window.__fps = fpsMeter;
+const fpsOverlay = params.get('fps') === '1' ? createFpsOverlay(fpsMeter, quality, () => renderer.info.render) : null;
 
 function frame() {
   const rawDt = clock.getDelta();
   const realDt = Math.min(rawDt, 0.05); // simulation step (clamped after stalls)
 
-  // Rolling FPS average from the true frame time (allocation-free ring buffer)
-  frameSum += rawDt - frameTimes[frameIdx];
-  frameTimes[frameIdx] = rawDt;
-  frameIdx = (frameIdx + 1) % FPS_N;
-  frameCount = Math.min(FPS_N, frameCount + 1);
-  window.__fps = frameSum > 0 ? Math.round((frameCount / frameSum) * 10) / 10 : 0;
+  // Frame-time stats (allocation-free ring) and the adaptive quality governor, both on the true frame time
+  fpsMeter.push(rawDt);
+  quality.sample(rawDt);
 
   // Hitstop: the world is frozen for exactly `hitstop` seconds (leftover frame time carries on),
   // then the camera shake starts.
@@ -2831,11 +2894,14 @@ function frame() {
   sparks.update(gdt, floorY);
   drops.update(gdt, floorY);
   glints.update(gdt, -10);
-  bamboo.update(simT);
+  const q = quality.level;
+  if (quality.frame % q.bambooEvery === 0) bamboo.update(simT);
   for (let i = 0; i < norenPanels.length; i++) norenPanels[i].pivot.rotation.x = Math.sin(simT * 0.65 + norenPanels[i].phase) * 0.065;
   dust.update(simT);
   updateCamera(simT, realDt);
+  if (quality.frame % q.shadowEvery === 0) renderer.shadowMap.needsUpdate = true;
   renderer.render(scene, camera);
+  fpsOverlay?.update(performance.now());
 }
 renderer.setAnimationLoop(frame);
 
@@ -2846,6 +2912,7 @@ document.addEventListener('visibilitychange', () => {
     audio.ctx?.suspend();
   } else {
     clock.getDelta(); // drop the hidden interval
+    quality.settle(); // the first frames back are not representative
     renderer.setAnimationLoop(frame);
     audio.ctx?.resume().catch(() => {});
   }
@@ -2854,6 +2921,13 @@ document.addEventListener('visibilitychange', () => {
 // ---------------------------------------------------------------------------
 // Test hooks
 // ---------------------------------------------------------------------------
+/** Renderer cost of the last frame (draw calls include the shadow pass) + quality state, for tests and NOTES_perf. */
+window.__perf = () => ({
+  calls: renderer.info.render.calls, triangles: renderer.info.render.triangles, points: renderer.info.render.points,
+  geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures, programs: renderer.info.programs.length,
+  pixelRatio: renderer.getPixelRatio(), shadowMap: sun.shadow.mapSize.x, batched: batchStats, quality: quality.state(),
+});
+window.__quality = quality;
 window.__game = {
   get sharpness() { return game.sharpness; },
   get angle() { return game.angle; },
@@ -2925,7 +2999,7 @@ window.__knife = {
       mode: game.mode, phase: cine.phase, cinePhase: cine.phase, timeScale, hitstop, lastHitstopMs: cine.lastHitstopMs,
       shake, letterbox: this.letterbox, target: this.target, selected: this.selected, unlocked: this.unlocked,
       sharpness: game.sharpness, angle: game.angle, pressure: game.pressure, stone: this.stone, wear: this.wear,
-      halvesVisible: this.halvesVisible, lastResult: cine.lastResult, fps: window.__fps,
+      halvesVisible: this.halvesVisible, lastResult: cine.lastResult, fps: fpsMeter.current,
       screen: flow.screen, flowMode: flow.mode,
     };
   },
